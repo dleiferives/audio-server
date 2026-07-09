@@ -124,6 +124,35 @@ Unknown fields or out-of-range values return `400` with `invalid audio request` 
 
 See [`tts/omnivoice/README.md`](../tts/omnivoice/README.md) for the standalone CLI script (`greek_tts.py`), which the sidecar's model-loading logic is based on.
 
+## kokoro
+
+**ID:** `kokoro`  
+**Package:** `internal/provider/kokoro`  
+**Sidecar:** `tts/kokoro/server.py`  
+**Requires:** Python 3.10+, `torch`, `kokoro`, `soundfile` (sidecar); nothing on the Go side beyond network access to the sidecar
+
+[Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) is a small (~82M parameter), fast, multi-voice, multi-language TTS model — this is the provider we use instead of Piper (issue #4), since Piper doesn't run on the target hardware. Unlike OmniVoice, Kokoro is light enough to run on CPU if needed, though GPU is still faster.
+
+The Go provider mirrors OmniVoice's shape exactly: a thin HTTP client calling `GET /health`, `GET /voices`, `POST /synthesize`, and (via `provider.Lifecycle`) `POST /load` / `POST /unload`. Enable it with `AUDIO_KOKORO_ADDR` (or `-kokoro-addr`), e.g. `http://127.0.0.1:8021`; disabled when blank. The sidecar only ever produces WAV — non-`wav` formats are encoded via the same shared `encode.FFmpeg` instance as espeak-ng and OmniVoice (`internal/provider/kokoro.Provider.Encoder`). Kokoro doesn't implement `provider.Streamer` either.
+
+Run the sidecar independently — see [`tts/kokoro/README.md`](../tts/kokoro/README.md) for install steps:
+
+```bash
+./tts/kokoro/server.py --port 8021
+```
+
+### GPU model lifecycle (VRAM budget)
+
+Same pattern as OmniVoice: the sidecar lazily loads a single shared `KModel` (the ~82M-parameter model itself is language-independent) plus a `KPipeline` per requested language (cached, created lazily) on the queue manager's first `Warm` call. `AUDIO_KOKORO_IDLE_UNLOAD_SECONDS` (default 30s) unloads everything after the queue's been empty that long; `AUDIO_KOKORO_CONCURRENCY` (default **1**) caps concurrent Kokoro jobs. Kokoro's footprint is much smaller than OmniVoice's (well under 1GB VRAM in practice), but the two providers don't currently coordinate VRAM budget with each other — if both are configured and happen to be warm simultaneously on a tightly VRAM-constrained box, that's on you to size against your card; there's no cross-provider GPU arbitration yet.
+
+### Routing
+
+- `"model": "kokoro"` routes directly to this provider — it's not wired into any automatic `language` routing today (unlike OmniVoice's `el` → `omnivoice`), since its languages overlap with espeak-ng's default English handling and we didn't want to silently change existing default behavior.
+
+### Voice selection
+
+Same shape as espeak-ng: `voice` from the request (default `af_heart`, American English female) if set and not `"auto"`, otherwise falls back to the default. `language` (BCP-47, e.g. `en-us`, `en-gb`, `ja`, `zh`) selects which Kokoro `lang_code`/G2P frontend to use; see `LANGUAGE_TO_LANG_CODE` in `tts/kokoro/server.py`.
+
 ## Adding a provider
 
 1. Create a package under `internal/provider/<name>/`

@@ -18,6 +18,7 @@ import (
 	"github.com/dleiferives/audio-server/internal/encode"
 	"github.com/dleiferives/audio-server/internal/provider"
 	"github.com/dleiferives/audio-server/internal/provider/espeak"
+	"github.com/dleiferives/audio-server/internal/provider/kokoro"
 	"github.com/dleiferives/audio-server/internal/provider/omnivoice"
 	"github.com/dleiferives/audio-server/internal/queue"
 	"github.com/dleiferives/audio-server/internal/server"
@@ -37,6 +38,9 @@ func main() {
 	omnivoiceAddr := flag.String("omnivoice-addr", env("AUDIO_OMNIVOICE_ADDR", ""), "OmniVoice sidecar base URL (e.g. http://127.0.0.1:8020); disabled when blank")
 	omnivoiceConcurrency := flag.Int("omnivoice-concurrency", envInt("AUDIO_OMNIVOICE_CONCURRENCY", 1), "concurrent OmniVoice workers (keep at 1 on limited VRAM)")
 	omnivoiceIdleUnloadSeconds := flag.Int("omnivoice-idle-unload-seconds", envInt("AUDIO_OMNIVOICE_IDLE_UNLOAD_SECONDS", 30), "seconds an empty OmniVoice queue waits before the model is unloaded")
+	kokoroAddr := flag.String("kokoro-addr", env("AUDIO_KOKORO_ADDR", ""), "Kokoro TTS sidecar base URL (e.g. http://127.0.0.1:8021); disabled when blank")
+	kokoroConcurrency := flag.Int("kokoro-concurrency", envInt("AUDIO_KOKORO_CONCURRENCY", 1), "concurrent Kokoro workers (keep at 1 on limited VRAM)")
+	kokoroIdleUnloadSeconds := flag.Int("kokoro-idle-unload-seconds", envInt("AUDIO_KOKORO_IDLE_UNLOAD_SECONDS", 30), "seconds an empty Kokoro queue waits before the model is unloaded")
 	flag.Parse()
 
 	encoder := encode.NewFFmpeg(*ffmpegPath, *mp3Bitrate)
@@ -49,6 +53,12 @@ func main() {
 		providers = append(providers, omnivoiceProvider)
 		workers[omnivoiceProvider.ID()] = *omnivoiceConcurrency
 		idleUnload[omnivoiceProvider.ID()] = time.Duration(*omnivoiceIdleUnloadSeconds) * time.Second
+	}
+	if strings.TrimSpace(*kokoroAddr) != "" {
+		kokoroProvider := kokoro.New(*kokoroAddr, nil, encoder)
+		providers = append(providers, kokoroProvider)
+		workers[kokoroProvider.ID()] = *kokoroConcurrency
+		idleUnload[kokoroProvider.ID()] = time.Duration(*kokoroIdleUnloadSeconds) * time.Second
 	}
 
 	providerMap := make(map[string]provider.Provider, len(providers))

@@ -7,12 +7,14 @@ cmd/audio/main.go          — binary entry point, wires config + providers + qu
 internal/server/           — HTTP server, routing, auth
 internal/queue/             — per-provider job queue, worker pools, GPU model lifecycle
 internal/provider/         — Provider (+ optional Lifecycle) interface + shared types
-internal/provider/espeak/    — espeak-ng subprocess provider
+internal/provider/espeak/    — espeak-ng subprocess provider (implements Streamer)
 internal/provider/omnivoice/ — OmniVoice HTTP sidecar client provider (implements Lifecycle)
-internal/encode/             — ffmpeg WAV→MP3 encoder
+internal/provider/kokoro/    — Kokoro TTS HTTP sidecar client provider (implements Lifecycle)
+internal/encode/             — ffmpeg WAV→{MP3,OGG,Opus,FLAC} encoder
 internal/run/                — thin subprocess abstraction (testable Command type)
 tts/espeak-ng/                — espeak-ng setup notes (no code, system binary only)
 tts/omnivoice/                — OmniVoice HTTP sidecar (server.py) + standalone CLI script
+tts/kokoro/                   — Kokoro TTS HTTP sidecar (server.py)
 ```
 
 ## Request flow
