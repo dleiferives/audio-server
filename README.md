@@ -1,14 +1,15 @@
 # audio-server
 
-A standalone audio manager service for TTS generation. Exposes an OpenAI-compatible speech endpoint and routes requests to configured provider backends.
+A standalone audio manager service for TTS and STT. Exposes OpenAI-compatible speech and transcription endpoints and routes requests to configured provider backends.
 
 ## Providers
 
 | Provider | Type | Status |
 |---|---|---|
-| `espeak-ng` | local subprocess | shipped |
-| `omnivoice` | HTTP sidecar (Python / GPU) | shipped, requires `AUDIO_OMNIVOICE_ADDR` |
-| `kokoro` | HTTP sidecar (Python / GPU or CPU) | shipped, requires `AUDIO_KOKORO_ADDR` |
+| `espeak-ng` | local subprocess (TTS) | shipped |
+| `omnivoice` | HTTP sidecar (TTS, Python / GPU) | shipped, requires `AUDIO_OMNIVOICE_ADDR` |
+| `kokoro` | HTTP sidecar (TTS, Python / GPU or CPU) | shipped, requires `AUDIO_KOKORO_ADDR` |
+| `faster-whisper` | HTTP sidecar (STT, Python / GPU or CPU) | shipped, requires `AUDIO_FASTERWHISPER_ADDR` |
 
 ## Install runtime tools
 
@@ -65,6 +66,16 @@ curl -sS --no-buffer http://127.0.0.1:8010/v1/audio/speech \
 
 Audio is flushed to the response as it's produced instead of buffered first. Only `espeak-ng` supports this today (`stream: true` against `omnivoice` just falls back to the buffered response) — see [`docs/api.md`](docs/api.md#streaming-stream-true).
 
+## Transcribe speech (STT)
+
+```bash
+curl -sS http://127.0.0.1:8010/v1/audio/transcriptions \
+  -F file=@speech.wav \
+  -F language=en
+```
+
+Requires `AUDIO_FASTERWHISPER_ADDR` to be set — see [`docs/providers.md`](docs/providers.md#speech-to-text-providers) and [`docs/api.md`](docs/api.md).
+
 ## List voices
 
 ```bash
@@ -97,6 +108,7 @@ curl -sS http://127.0.0.1:8010/healthz
 | `AUDIO_KOKORO_ADDR` | _(empty)_ | Kokoro sidecar base URL, e.g. `http://127.0.0.1:8021`; provider disabled when blank |
 | `AUDIO_KOKORO_CONCURRENCY` | `1` | concurrent Kokoro workers |
 | `AUDIO_KOKORO_IDLE_UNLOAD_SECONDS` | `30` | seconds an empty Kokoro queue waits before the model is unloaded |
+| `AUDIO_FASTERWHISPER_ADDR` | _(empty)_ | faster-whisper sidecar base URL, e.g. `http://127.0.0.1:8030`; STT disabled when blank |
 
 All flags are also available as CLI flags — run `./bin/audio-server -help` for the full list.
 
@@ -107,3 +119,7 @@ See [`docs/providers.md`](docs/providers.md#omnivoice) for the sidecar provider,
 ## Kokoro (multi-voice TTS)
 
 Used in place of Piper (issue #4), which doesn't run on the target hardware. See [`docs/providers.md`](docs/providers.md#kokoro) for the sidecar provider, and [`tts/kokoro/README.md`](tts/kokoro/README.md) for setup.
+
+## faster-whisper (STT)
+
+See [`docs/providers.md`](docs/providers.md#faster-whisper) for the sidecar provider and why STT doesn't go through the same job queue as TTS.

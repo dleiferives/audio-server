@@ -200,6 +200,39 @@ Fetch the result of a finished job. Same response headers as
 | 404 | Unknown job ID, or the job failed (see `GET /v1/audio/jobs/{id}` for the error). |
 | 409 | Job exists but hasn't finished yet — poll `GET /v1/audio/jobs/{id}` first. |
 
+---
+
+### `POST /v1/audio/transcriptions`
+
+Speech-to-text, OpenAI-compatible: `multipart/form-data`, synchronous (no job queue involved — see `docs/providers.md` for why STT doesn't route through `internal/queue` the way TTS does). Returns `503` if no STT provider is configured (`AUDIO_FASTERWHISPER_ADDR` unset).
+
+```bash
+curl -sS http://127.0.0.1:8010/v1/audio/transcriptions \
+  -F file=@speech.wav \
+  -F language=en
+```
+
+**Form fields**
+
+| Field | Required | Description |
+|---|---|---|
+| `file` | yes | Audio file. faster-whisper decodes most common containers/codecs directly — no need to pre-convert to WAV. |
+| `model` | no | Provider ID to use. `whisper-1`, `auto`, or blank map to the default STT provider. |
+| `language` | no | ISO-639-1/BCP-47 language hint (e.g. `en`). Omit to let the model auto-detect. |
+| `response_format` | no | `json` (default, `{"text": "..."}`) or `text` (plain body). |
+
+**Response 200**
+```json
+{ "text": "The quick brown fox jumps over the lazy dog." }
+```
+
+| Status | Condition |
+|---|---|
+| 400 | Missing `file`, invalid `response_format`, or unknown `model` |
+| 401 | Missing or invalid API key (when `AUDIO_API_KEY` is set) |
+| 503 | No STT provider configured, or the provider is unavailable |
+| 504 | Timed out |
+
 ## Authentication
 
 When `AUDIO_API_KEY` is set, all `/v1/` endpoints require one of:

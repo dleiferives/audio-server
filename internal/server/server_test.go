@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/dleiferives/audio-server/internal/provider"
 	"github.com/dleiferives/audio-server/internal/queue"
+	"github.com/dleiferives/audio-server/internal/sttprovider"
 )
 
 func TestSpeechReturnsProviderAudio(t *testing.T) {
@@ -238,6 +240,81 @@ func TestCreateJobRejectsStream(t *testing.T) {
 	}
 }
 
+func TestTranscriptionsWithoutProvidersReturns503(t *testing.T) {
+	s := newTestServer(t, fakeProvider{}, Config{})
+	resp := multipartAudioRequest(t, s, nil, []byte("fake-audio"))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+}
+
+func TestTranscriptionsReturnsText(t *testing.T) {
+	var gotAudio []byte
+	var gotLanguage string
+	stt := fakeSttProvider{
+		id:     "faster-whisper",
+		result: sttprovider.TranscriptionResult{Text: "hello world", Language: "en"},
+		transcribeHook: func(req sttprovider.TranscriptionRequest) {
+			gotAudio = req.Audio
+			gotLanguage = req.Language
+		},
+	}
+	s := newTestServer(t, fakeProvider{}, Config{SttProviders: []sttprovider.Provider{stt}})
+
+	resp := multipartAudioRequest(t, s, map[string]string{"language": "en"}, []byte("fake-audio-bytes"))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var body struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Text != "hello world" {
+		t.Fatalf("unexpected text: %q", body.Text)
+	}
+	if string(gotAudio) != "fake-audio-bytes" || gotLanguage != "en" {
+		t.Fatalf("unexpected request: audio=%q language=%q", gotAudio, gotLanguage)
+	}
+}
+
+func TestTranscriptionsPlainTextFormat(t *testing.T) {
+	stt := fakeSttProvider{id: "faster-whisper", result: sttprovider.TranscriptionResult{Text: "plain text result"}}
+	s := newTestServer(t, fakeProvider{}, Config{SttProviders: []sttprovider.Provider{stt}})
+
+	resp := multipartAudioRequest(t, s, map[string]string{"response_format": "text"}, []byte("audio"))
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || string(body) != "plain text result" {
+		t.Fatalf("unexpected response: status=%d body=%q", resp.StatusCode, body)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("unexpected content-type: %q", ct)
+	}
+}
+
+func TestTranscriptionsUnknownModelReturns400(t *testing.T) {
+	s := newTestServer(t, fakeProvider{}, Config{SttProviders: []sttprovider.Provider{fakeSttProvider{id: "faster-whisper"}}})
+	resp := multipartAudioRequest(t, s, map[string]string{"model": "nonexistent"}, []byte("audio"))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestTranscriptionsProviderErrorMapsTo503(t *testing.T) {
+	stt := fakeSttProvider{id: "faster-whisper", transcribeErr: sttprovider.ErrUnavailable}
+	s := newTestServer(t, fakeProvider{}, Config{SttProviders: []sttprovider.Provider{stt}})
+	resp := multipartAudioRequest(t, s, nil, []byte("audio"))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+}
+
 func TestVoices(t *testing.T) {
 	s := newTestServer(t, fakeProvider{
 		voices: []provider.Voice{{Provider: "fake", Voice: "en", Language: "en", Name: "English"}},
@@ -364,4 +441,53 @@ func (f fakeProvider) Synthesize(ctx context.Context, req provider.SpeechRequest
 		return provider.SpeechResult{}, f.synthesizeErr
 	}
 	return f.result, nil
+}
+
+type fakeSttProvider struct {
+	id             string
+	result         sttprovider.TranscriptionResult
+	healthErr      error
+	transcribeErr  error
+	transcribeHook func(sttprovider.TranscriptionRequest)
+}
+
+func (f fakeSttProvider) ID() string { return f.id }
+
+func (f fakeSttProvider) Health(context.Context) error { return f.healthErr }
+
+func (f fakeSttProvider) Transcribe(_ context.Context, req sttprovider.TranscriptionRequest) (sttprovider.TranscriptionResult, error) {
+	if f.transcribeHook != nil {
+		f.transcribeHook(req)
+	}
+	if f.transcribeErr != nil {
+		return sttprovider.TranscriptionResult{}, f.transcribeErr
+	}
+	return f.result, nil
+}
+
+func multipartAudioRequest(t *testing.T, s *Server, fields map[string]string, audio []byte) *http.Response {
+	t.Helper()
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	for k, v := range fields {
+		if err := w.WriteField(k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fw, err := w.CreateFormFile("file", "audio.wav")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write(audio); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", &body)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	return rr.Result()
 }

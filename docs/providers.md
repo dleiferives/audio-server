@@ -153,12 +153,46 @@ Same pattern as OmniVoice: the sidecar lazily loads a single shared `KModel` (th
 
 Same shape as espeak-ng: `voice` from the request (default `af_heart`, American English female) if set and not `"auto"`, otherwise falls back to the default. `language` (BCP-47, e.g. `en-us`, `en-gb`, `ja`, `zh`) selects which Kokoro `lang_code`/G2P frontend to use; see `LANGUAGE_TO_LANG_CODE` in `tts/kokoro/server.py`.
 
+## Speech-to-text providers
+
+STT is a separate interface, `sttprovider.Provider` (`internal/sttprovider/sttprovider.go`):
+
+```go
+type Provider interface {
+    ID() string
+    Health(ctx context.Context) error
+    Transcribe(ctx context.Context, req TranscriptionRequest) (TranscriptionResult, error)
+}
+```
+
+It's intentionally not `provider.Provider` — the request/result shapes differ (audio bytes + language in, text out), and **STT doesn't route through `internal/queue`** the way TTS does. That queue exists to solve a specific problem: GPU model lifecycle for slow, VRAM-heavy generation where callers benefit from seeing queue position. Transcription requests are typically one quick round trip, so `internal/server.transcriptions` calls `Transcribe` directly and synchronously, bounded by the same `AUDIO_REQUEST_TIMEOUT_SECONDS`. If STT ever needs the same queue treatment (e.g. a much larger Whisper model that's slow enough to want queuing), that's a deliberate follow-up, not something papered over here.
+
+Registered via `server.Config.SttProviders` / `DefaultSttProvider` — entirely optional; `POST /v1/audio/transcriptions` returns `503` if none are configured.
+
+### faster-whisper
+
+**ID:** `faster-whisper`  
+**Package:** `internal/provider/fasterwhisper`  
+**Sidecar:** `stt/fasterwhisper/server.py`  
+**Requires:** Python 3.10+, `faster-whisper`, `torch` (sidecar); nothing on the Go side beyond network access to the sidecar
+
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2-based Whisper reimplementation) transcribes audio to text, with automatic language detection if `language` isn't given. The sidecar accepts raw audio bytes directly (no need to specify the format — it decodes via the same machinery Whisper/ffmpeg use internally, so WAV/MP3/etc. all work without pre-conversion).
+
+Enable it with `AUDIO_FASTERWHISPER_ADDR` (or `-faster-whisper-addr`), e.g. `http://127.0.0.1:8030`. Run the sidecar independently:
+
+```bash
+pip install faster-whisper torch
+./stt/fasterwhisper/server.py --port 8030 --model-size small
+```
+
+**Model lifecycle, and why it's different from the TTS sidecars:** since there's no Go-orchestrated queue driving this provider (see above), the sidecar manages its own idle-unload timer internally — it loads the model lazily on first `/transcribe` call and unloads it after `--idle-unload-seconds` (default 60s, resettable via `FASTERWHISPER_IDLE_UNLOAD_SECONDS`) of no requests, resetting the timer on every transcription. `POST /load` / `POST /unload` are still exposed on the sidecar (same shape as the TTS sidecars) so a future queue-based integration could drive it explicitly instead.
+
 ## Adding a provider
 
 1. Create a package under `internal/provider/<name>/`
 2. Implement `provider.Provider`
 3. Instantiate in `cmd/audio/main.go` and pass to `server.Config.Providers`
-4. If the provider needs a script, model, or sidecar, put it under `tts/<name>/` (e.g. `tts/omnivoice/`, `tts/espeak-ng/`). Future STT/diarization providers follow the same pattern under `stt/<name>/`.
+4. If the provider needs a script, model, or sidecar, put it under `tts/<name>/` (e.g. `tts/omnivoice/`, `tts/espeak-ng/`) or `stt/<name>/` for speech-to-text (e.g. `stt/fasterwhisper/`).
 5. If the provider has settings beyond the shared `SpeechRequest` fields (voice/language/speed/format), define a provider-owned `Options` struct and decode it from `SpeechRequest.ProviderOptions` (`json.RawMessage`) with `DisallowUnknownFields`. Don't add provider-specific fields to the shared `SpeechRequest` type — see OmniVoice's `steps`/`seed`/`chunk_seconds`/`chunk_threshold` for the pattern.
 
 The server routes requests by provider ID; the default provider handles all OpenAI model aliases.

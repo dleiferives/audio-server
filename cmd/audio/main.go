@@ -18,10 +18,12 @@ import (
 	"github.com/dleiferives/audio-server/internal/encode"
 	"github.com/dleiferives/audio-server/internal/provider"
 	"github.com/dleiferives/audio-server/internal/provider/espeak"
+	"github.com/dleiferives/audio-server/internal/provider/fasterwhisper"
 	"github.com/dleiferives/audio-server/internal/provider/kokoro"
 	"github.com/dleiferives/audio-server/internal/provider/omnivoice"
 	"github.com/dleiferives/audio-server/internal/queue"
 	"github.com/dleiferives/audio-server/internal/server"
+	"github.com/dleiferives/audio-server/internal/sttprovider"
 )
 
 func main() {
@@ -41,6 +43,7 @@ func main() {
 	kokoroAddr := flag.String("kokoro-addr", env("AUDIO_KOKORO_ADDR", ""), "Kokoro TTS sidecar base URL (e.g. http://127.0.0.1:8021); disabled when blank")
 	kokoroConcurrency := flag.Int("kokoro-concurrency", envInt("AUDIO_KOKORO_CONCURRENCY", 1), "concurrent Kokoro workers (keep at 1 on limited VRAM)")
 	kokoroIdleUnloadSeconds := flag.Int("kokoro-idle-unload-seconds", envInt("AUDIO_KOKORO_IDLE_UNLOAD_SECONDS", 30), "seconds an empty Kokoro queue waits before the model is unloaded")
+	fasterWhisperAddr := flag.String("faster-whisper-addr", env("AUDIO_FASTERWHISPER_ADDR", ""), "faster-whisper sidecar base URL (e.g. http://127.0.0.1:8030); disabled when blank")
 	flag.Parse()
 
 	encoder := encode.NewFFmpeg(*ffmpegPath, *mp3Bitrate)
@@ -73,6 +76,11 @@ func main() {
 		SynthesizeTimeout: requestTimeout,
 	})
 
+	var sttProviders []sttprovider.Provider
+	if strings.TrimSpace(*fasterWhisperAddr) != "" {
+		sttProviders = append(sttProviders, fasterwhisper.New(*fasterWhisperAddr, nil))
+	}
+
 	audioServer, err := server.New(server.Config{
 		Providers:       providers,
 		DefaultProvider: *defaultProvider,
@@ -81,6 +89,7 @@ func main() {
 		RequestTimeout:  requestTimeout,
 		Queue:           jobQueue,
 		StreamWorkers:   workers,
+		SttProviders:    sttProviders,
 	})
 	if err != nil {
 		log.Fatalf("audio server: %v", err)

@@ -14,11 +14,13 @@ import (
 
 	"github.com/dleiferives/audio-server/internal/provider"
 	"github.com/dleiferives/audio-server/internal/queue"
+	"github.com/dleiferives/audio-server/internal/sttprovider"
 )
 
 const (
 	defaultMaxInputChars  = 5000
 	defaultRequestTimeout = 30 * time.Second
+	defaultMaxUploadBytes = 25 << 20 // 25MB, matching OpenAI's transcription upload limit
 )
 
 type Config struct {
@@ -34,6 +36,13 @@ type Config struct {
 	// queue entirely since it's tied to one live connection rather than a
 	// poll-able job. Providers not listed (or with a value <= 0) get 1.
 	StreamWorkers map[string]int
+
+	// SttProviders is optional; the transcription endpoint returns 503 if
+	// none are configured. Unlike TTS, STT doesn't go through internal/queue
+	// today — see docs/providers.md for why.
+	SttProviders       []sttprovider.Provider
+	DefaultSttProvider string
+	MaxUploadBytes     int
 }
 
 type Server struct {
@@ -44,6 +53,10 @@ type Server struct {
 	requestTimeout  time.Duration
 	queue           *queue.Manager
 	streamSem       map[string]chan struct{}
+
+	sttProviders       map[string]sttprovider.Provider
+	defaultSttProvider string
+	maxUploadBytes     int
 }
 
 func New(cfg Config) (*Server, error) {
@@ -77,6 +90,9 @@ func New(cfg Config) (*Server, error) {
 	if cfg.RequestTimeout <= 0 {
 		cfg.RequestTimeout = defaultRequestTimeout
 	}
+	if cfg.MaxUploadBytes <= 0 {
+		cfg.MaxUploadBytes = defaultMaxUploadBytes
+	}
 	streamSem := make(map[string]chan struct{}, len(providers))
 	for id := range providers {
 		workers := cfg.StreamWorkers[id]
@@ -85,14 +101,39 @@ func New(cfg Config) (*Server, error) {
 		}
 		streamSem[id] = make(chan struct{}, workers)
 	}
+
+	sttProviders := make(map[string]sttprovider.Provider, len(cfg.SttProviders))
+	for _, p := range cfg.SttProviders {
+		if p == nil {
+			return nil, errors.New("stt provider is nil")
+		}
+		id := strings.TrimSpace(p.ID())
+		if id == "" {
+			return nil, errors.New("stt provider id is empty")
+		}
+		sttProviders[id] = p
+	}
+	cfg.DefaultSttProvider = strings.TrimSpace(cfg.DefaultSttProvider)
+	if cfg.DefaultSttProvider == "" && len(cfg.SttProviders) > 0 {
+		cfg.DefaultSttProvider = cfg.SttProviders[0].ID()
+	}
+	if cfg.DefaultSttProvider != "" {
+		if _, ok := sttProviders[cfg.DefaultSttProvider]; !ok {
+			return nil, fmt.Errorf("default stt provider %q is not registered", cfg.DefaultSttProvider)
+		}
+	}
+
 	return &Server{
-		providers:       providers,
-		defaultProvider: cfg.DefaultProvider,
-		apiKey:          cfg.APIKey,
-		maxInputChars:   cfg.MaxInputChars,
-		requestTimeout:  cfg.RequestTimeout,
-		queue:           cfg.Queue,
-		streamSem:       streamSem,
+		providers:          providers,
+		defaultProvider:    cfg.DefaultProvider,
+		apiKey:             cfg.APIKey,
+		maxInputChars:      cfg.MaxInputChars,
+		requestTimeout:     cfg.RequestTimeout,
+		queue:              cfg.Queue,
+		streamSem:          streamSem,
+		sttProviders:       sttProviders,
+		defaultSttProvider: cfg.DefaultSttProvider,
+		maxUploadBytes:     cfg.MaxUploadBytes,
 	}, nil
 }
 
@@ -104,6 +145,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/audio/jobs", s.auth(s.createJob))
 	mux.HandleFunc("GET /v1/audio/jobs/{id}", s.auth(s.getJob))
 	mux.HandleFunc("GET /v1/audio/jobs/{id}/audio", s.auth(s.getJobAudio))
+	mux.HandleFunc("POST /v1/audio/transcriptions", s.auth(s.transcriptions))
 	return mux
 }
 
@@ -112,8 +154,16 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	status := http.StatusOK
-	checks := make(map[string]string, len(s.providers))
+	checks := make(map[string]string, len(s.providers)+len(s.sttProviders))
 	for id, p := range s.providers {
+		if err := p.Health(ctx); err != nil {
+			status = http.StatusServiceUnavailable
+			checks[id] = err.Error()
+			continue
+		}
+		checks[id] = "ok"
+	}
+	for id, p := range s.sttProviders {
 		if err := p.Health(ctx); err != nil {
 			status = http.StatusServiceUnavailable
 			checks[id] = err.Error()
@@ -327,6 +377,98 @@ func (s *Server) decodeAndRoute(w http.ResponseWriter, r *http.Request) (provide
 		return provider.SpeechRequest{}, nil, false
 	}
 	return req, p, true
+}
+
+// transcriptions handles POST /v1/audio/transcriptions, an OpenAI-compatible
+// multipart/form-data endpoint: a "file" field with the audio, optional
+// "model" (provider ID; "whisper-1" and blank map to the default STT
+// provider), "language", and "response_format" ("json", the default, or
+// "text").
+func (s *Server) transcriptions(w http.ResponseWriter, r *http.Request) {
+	if len(s.sttProviders) == 0 {
+		writeError(w, http.StatusServiceUnavailable, errors.New("no speech-to-text providers configured"))
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, int64(s.maxUploadBytes))
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("file is required"))
+		return
+	}
+	defer file.Close()
+	audio, err := io.ReadAll(file)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	model := r.FormValue("model")
+	responseFormat := r.FormValue("response_format")
+	if strings.TrimSpace(responseFormat) == "" {
+		responseFormat = "json"
+	}
+	if responseFormat != "json" && responseFormat != "text" {
+		writeError(w, http.StatusBadRequest, errors.New("response_format must be json or text"))
+		return
+	}
+
+	p, ok := s.sttProviderFor(model)
+	if !ok {
+		writeError(w, http.StatusBadRequest, errors.New("unknown transcription model"))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), s.requestTimeout)
+	defer cancel()
+	result, err := p.Transcribe(ctx, sttprovider.TranscriptionRequest{
+		Audio:    audio,
+		Filename: header.Filename,
+		Language: r.FormValue("language"),
+		Model:    model,
+	})
+	if err != nil {
+		writeSttProviderError(w, err)
+		return
+	}
+
+	if responseFormat == "text" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(result.Text))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"text": result.Text})
+}
+
+func (s *Server) sttProviderFor(model string) (sttprovider.Provider, bool) {
+	model = strings.TrimSpace(model)
+	switch model {
+	case "", "whisper-1", "auto":
+		p, ok := s.sttProviders[s.defaultSttProvider]
+		return p, ok
+	default:
+		p, ok := s.sttProviders[model]
+		return p, ok
+	}
+}
+
+func writeSttProviderError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		writeError(w, http.StatusGatewayTimeout, err)
+	case errors.Is(err, sttprovider.ErrUnsupportedFormat), errors.Is(err, sttprovider.ErrInvalidRequest):
+		writeError(w, http.StatusBadRequest, err)
+	case errors.Is(err, sttprovider.ErrUnavailable):
+		writeError(w, http.StatusServiceUnavailable, err)
+	default:
+		writeError(w, http.StatusInternalServerError, err)
+	}
 }
 
 func writeAudio(w http.ResponseWriter, result provider.SpeechResult) {
