@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 )
 
 var (
@@ -20,6 +21,7 @@ type SpeechRequest struct {
 	ResponseFormat  string          `json:"response_format"`
 	Speed           float64         `json:"speed"`
 	ProviderOptions json.RawMessage `json:"provider_options,omitempty"`
+	Stream          bool            `json:"stream,omitempty"`
 }
 
 type SpeechResult struct {
@@ -55,4 +57,25 @@ type Provider interface {
 type Lifecycle interface {
 	Warm(ctx context.Context) error
 	Idle(ctx context.Context) error
+}
+
+// StreamMeta describes a streaming response, computed before any audio
+// bytes are written.
+type StreamMeta struct {
+	ProviderID  string
+	Model       string
+	Voice       string
+	Format      string
+	ContentType string
+}
+
+// Streamer is an optional interface for providers that can write audio
+// progressively instead of buffering the full result. SynthesizeStream must
+// compute StreamMeta and call onHeader exactly once before writing any bytes
+// to w — voice/format selection doesn't depend on the actual audio bytes, so
+// this can happen synchronously up front. Providers that don't implement
+// this (e.g. a diffusion model that only produces a complete waveform) are
+// simply not eligible for streaming; callers fall back to Synthesize.
+type Streamer interface {
+	SynthesizeStream(ctx context.Context, req SpeechRequest, onHeader func(StreamMeta), w io.Writer) error
 }

@@ -3,6 +3,7 @@ package espeak
 import (
 	"context"
 	"fmt"
+	"io"
 	"math"
 	"os/exec"
 	"strconv"
@@ -23,14 +24,18 @@ const (
 type Encoder interface {
 	Health(ctx context.Context) error
 	Encode(ctx context.Context, wav []byte, format string) ([]byte, string, error)
+	EncodeStream(ctx context.Context, wav io.Reader, format string, w io.Writer) (string, error)
 }
 
 type Provider struct {
 	Path         string
 	DefaultVoice string
 	Run          run.Command
+	RunStream    run.StreamCommand
 	Encoder      Encoder
 }
+
+var _ provider.Streamer = Provider{}
 
 func New(path, defaultVoice string, enc Encoder) Provider {
 	if strings.TrimSpace(path) == "" {
@@ -39,7 +44,7 @@ func New(path, defaultVoice string, enc Encoder) Provider {
 	if strings.TrimSpace(defaultVoice) == "" {
 		defaultVoice = defaultVoiceName()
 	}
-	return Provider{Path: path, DefaultVoice: defaultVoice, Run: run.Exec, Encoder: enc}
+	return Provider{Path: path, DefaultVoice: defaultVoice, Run: run.Exec, RunStream: run.ExecStream, Encoder: enc}
 }
 
 func (p Provider) ID() string {
@@ -71,18 +76,7 @@ func (p Provider) Voices(ctx context.Context, language string) ([]provider.Voice
 }
 
 func (p Provider) Synthesize(ctx context.Context, req provider.SpeechRequest) (provider.SpeechResult, error) {
-	format := strings.ToLower(strings.TrimSpace(req.ResponseFormat))
-	if format == "" {
-		format = "mp3"
-	}
-	voice := p.chooseVoice(req)
-	args := []string{
-		"--stdout",
-		"--stdin",
-		"-b", "1",
-		"-v", voice,
-		"-s", strconv.Itoa(WPM(req.Speed)),
-	}
+	format, voice, args := p.buildRequest(req)
 	wav, stderr, err := p.runner()(ctx, p.path(), args, []byte(req.Input))
 	if err != nil {
 		return provider.SpeechResult{}, fmt.Errorf("%w: espeak synthesis failed: %s", provider.ErrUnavailable, commandDetail(err, stderr))
@@ -112,6 +106,67 @@ func (p Provider) Synthesize(ctx context.Context, req provider.SpeechRequest) (p
 		Voice:       voice,
 		Format:      format,
 	}, nil
+}
+
+// SynthesizeStream implements provider.Streamer: it pipes espeak-ng's
+// output directly to w as it's produced (via ffmpeg for mp3) instead of
+// buffering the full result first.
+func (p Provider) SynthesizeStream(ctx context.Context, req provider.SpeechRequest, onHeader func(provider.StreamMeta), w io.Writer) error {
+	format, voice, args := p.buildRequest(req)
+	if format != "wav" && format != "mp3" {
+		return fmt.Errorf("%w: %s", provider.ErrUnsupportedFormat, format)
+	}
+	contentType := "audio/wav"
+	if format == "mp3" {
+		if p.Encoder == nil {
+			return fmt.Errorf("%w: %s", provider.ErrUnsupportedFormat, format)
+		}
+		contentType = "audio/mpeg"
+	}
+
+	if format == "wav" {
+		onHeader(provider.StreamMeta{ProviderID: p.ID(), Model: p.ID(), Voice: voice, Format: format, ContentType: contentType})
+		stderr, err := p.streamRunner()(ctx, p.path(), args, []byte(req.Input), w)
+		if err != nil {
+			return fmt.Errorf("%w: espeak synthesis failed: %s", provider.ErrUnavailable, commandDetail(err, stderr))
+		}
+		return nil
+	}
+
+	pr, pw := io.Pipe()
+	espeakDone := make(chan struct{})
+	var espeakErr error
+	var espeakStderr []byte
+	go func() {
+		defer close(espeakDone)
+		espeakStderr, espeakErr = p.streamRunner()(ctx, p.path(), args, []byte(req.Input), pw)
+		pw.CloseWithError(espeakErr)
+	}()
+
+	onHeader(provider.StreamMeta{ProviderID: p.ID(), Model: p.ID(), Voice: voice, Format: format, ContentType: contentType})
+	_, encErr := p.Encoder.EncodeStream(ctx, pr, format, w)
+	<-espeakDone
+
+	if espeakErr != nil {
+		return fmt.Errorf("%w: espeak synthesis failed: %s", provider.ErrUnavailable, commandDetail(espeakErr, espeakStderr))
+	}
+	return encErr
+}
+
+func (p Provider) buildRequest(req provider.SpeechRequest) (format, voice string, args []string) {
+	format = strings.ToLower(strings.TrimSpace(req.ResponseFormat))
+	if format == "" {
+		format = "mp3"
+	}
+	voice = p.chooseVoice(req)
+	args = []string{
+		"--stdout",
+		"--stdin",
+		"-b", "1",
+		"-v", voice,
+		"-s", strconv.Itoa(WPM(req.Speed)),
+	}
+	return format, voice, args
 }
 
 func WPM(speed float64) int {
@@ -150,6 +205,13 @@ func (p Provider) defaultVoice() string {
 		return defaultVoiceName()
 	}
 	return p.DefaultVoice
+}
+
+func (p Provider) streamRunner() run.StreamCommand {
+	if p.RunStream == nil {
+		return run.ExecStream
+	}
+	return p.RunStream
 }
 
 func (p Provider) runner() run.Command {

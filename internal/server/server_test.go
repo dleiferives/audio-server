@@ -201,6 +201,43 @@ func TestJobAudioNotReadyReturns409(t *testing.T) {
 	}
 }
 
+func TestStreamSpeechUsesStreamer(t *testing.T) {
+	p := fakeStreamer{fakeProvider: fakeProvider{id: "fake"}}
+	s := newTestServerWithProvider(t, p, "fake", Config{})
+
+	resp := request(t, s, http.MethodPost, "/v1/audio/speech", `{"input":"hello","stream":true}`, "")
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if string(body) != "streamed-bytes" {
+		t.Fatalf("body = %q", body)
+	}
+	if resp.Header.Get("X-TTS-Provider") != "fake" || resp.Header.Get("Content-Type") != "audio/wav" {
+		t.Fatalf("unexpected headers: %v", resp.Header)
+	}
+}
+
+func TestStreamSpeechFallsBackWhenProviderCannotStream(t *testing.T) {
+	s := newTestServer(t, fakeProvider{id: "fake"}, Config{})
+	resp := request(t, s, http.MethodPost, "/v1/audio/speech", `{"input":"hello","stream":true}`, "")
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || string(body) != "ok" {
+		t.Fatalf("expected buffered fallback, got status=%d body=%q", resp.StatusCode, body)
+	}
+}
+
+func TestCreateJobRejectsStream(t *testing.T) {
+	s := newTestServer(t, fakeProvider{}, Config{})
+	resp := request(t, s, http.MethodPost, "/v1/audio/jobs", `{"input":"hello","stream":true}`, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
 func TestVoices(t *testing.T) {
 	s := newTestServer(t, fakeProvider{
 		voices: []provider.Voice{{Provider: "fake", Voice: "en", Language: "en", Name: "English"}},
@@ -236,6 +273,23 @@ func newTestServer(t *testing.T, p fakeProvider, cfg Config) *Server {
 	cfg.Queue = queue.NewManager(queue.Config{
 		Providers: map[string]provider.Provider{p.id: p},
 		Workers:   map[string]int{p.id: 2},
+	})
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func newTestServerWithProvider(t *testing.T, p provider.Provider, id string, cfg Config) *Server {
+	t.Helper()
+	cfg.Providers = []provider.Provider{p}
+	if cfg.DefaultProvider == "" {
+		cfg.DefaultProvider = id
+	}
+	cfg.Queue = queue.NewManager(queue.Config{
+		Providers: map[string]provider.Provider{id: p},
+		Workers:   map[string]int{id: 2},
 	})
 	s, err := New(cfg)
 	if err != nil {
@@ -284,6 +338,16 @@ func (f fakeProvider) Voices(context.Context, string) ([]provider.Voice, error) 
 		return nil, f.healthErr
 	}
 	return f.voices, nil
+}
+
+type fakeStreamer struct {
+	fakeProvider
+}
+
+func (f fakeStreamer) SynthesizeStream(_ context.Context, req provider.SpeechRequest, onHeader func(provider.StreamMeta), w io.Writer) error {
+	onHeader(provider.StreamMeta{ProviderID: f.id, Model: f.id, Voice: "v", Format: "wav", ContentType: "audio/wav"})
+	_, err := w.Write([]byte("streamed-bytes"))
+	return err
 }
 
 func (f fakeProvider) Synthesize(ctx context.Context, req provider.SpeechRequest) (provider.SpeechResult, error) {

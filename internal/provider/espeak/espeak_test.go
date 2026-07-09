@@ -1,8 +1,10 @@
 package espeak
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"testing"
 
 	"github.com/dleiferives/audio-server/internal/provider"
@@ -100,6 +102,74 @@ func TestVoicesParsesEspeakOutput(t *testing.T) {
 	}
 }
 
+func TestSynthesizeStreamWAVWritesDirectly(t *testing.T) {
+	p := New("espeak-test", "en", nil)
+	p.RunStream = func(_ context.Context, name string, args []string, stdin []byte, w io.Writer) ([]byte, error) {
+		_, _ = w.Write([]byte("wav-bytes"))
+		return nil, nil
+	}
+
+	var headerCalled bool
+	var meta provider.StreamMeta
+	var out bytes.Buffer
+	err := p.SynthesizeStream(context.Background(), provider.SpeechRequest{
+		Input: "hello", ResponseFormat: "wav", Voice: "en-us",
+	}, func(m provider.StreamMeta) {
+		headerCalled = true
+		meta = m
+		if out.Len() != 0 {
+			t.Fatal("onHeader called after bytes were already written")
+		}
+	}, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !headerCalled || meta.ContentType != "audio/wav" || meta.Voice != "en-us" || meta.Format != "wav" {
+		t.Fatalf("unexpected meta: %+v", meta)
+	}
+	if out.String() != "wav-bytes" {
+		t.Fatalf("out = %q", out.String())
+	}
+}
+
+func TestSynthesizeStreamMP3PipesThroughEncoder(t *testing.T) {
+	p := New("espeak-test", "en", fakeEncoder{contentType: "audio/mpeg"})
+	p.RunStream = func(_ context.Context, name string, args []string, stdin []byte, w io.Writer) ([]byte, error) {
+		_, _ = w.Write([]byte("wav-bytes"))
+		return nil, nil
+	}
+
+	var headerCalled bool
+	var meta provider.StreamMeta
+	var out bytes.Buffer
+	err := p.SynthesizeStream(context.Background(), provider.SpeechRequest{
+		Input: "hello", ResponseFormat: "mp3",
+	}, func(m provider.StreamMeta) {
+		headerCalled = true
+		meta = m
+	}, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !headerCalled || meta.ContentType != "audio/mpeg" || meta.Format != "mp3" {
+		t.Fatalf("unexpected meta: %+v", meta)
+	}
+	if out.String() != "encoded:wav-bytes" {
+		t.Fatalf("out = %q", out.String())
+	}
+}
+
+func TestSynthesizeStreamEspeakFailurePropagates(t *testing.T) {
+	p := New("espeak-test", "en", nil)
+	p.RunStream = func(context.Context, string, []string, []byte, io.Writer) ([]byte, error) {
+		return []byte("boom"), errors.New("exit 1")
+	}
+	err := p.SynthesizeStream(context.Background(), provider.SpeechRequest{Input: "hello", ResponseFormat: "wav"}, func(provider.StreamMeta) {}, &bytes.Buffer{})
+	if !errors.Is(err, provider.ErrUnavailable) {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
+
 func TestSynthesizeCommandFailureIsUnavailable(t *testing.T) {
 	p := New("espeak-test", "en", nil)
 	p.Run = func(context.Context, string, []string, []byte) ([]byte, []byte, error) {
@@ -123,6 +193,15 @@ func (f fakeEncoder) Health(context.Context) error {
 
 func (f fakeEncoder) Encode(context.Context, []byte, string) ([]byte, string, error) {
 	return f.audio, f.contentType, f.err
+}
+
+func (f fakeEncoder) EncodeStream(_ context.Context, wav io.Reader, _ string, w io.Writer) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	got, _ := io.ReadAll(wav)
+	_, _ = w.Write([]byte("encoded:" + string(got)))
+	return f.contentType, nil
 }
 
 func equal(a, b []string) bool {

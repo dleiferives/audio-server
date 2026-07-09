@@ -53,6 +53,17 @@ curl -sS http://127.0.0.1:8010/v1/audio/jobs/$ID/audio -o out.wav  # once status
 
 See [`docs/api.md`](docs/api.md) for the full job API — this is the one to use if you want visibility into queue position instead of just blocking on `/v1/audio/speech`.
 
+## Stream speech
+
+```bash
+curl -sS --no-buffer http://127.0.0.1:8010/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -d '{"input":"a longer piece of text","voice":"en-us","response_format":"mp3","stream":true}' \
+  --output out.mp3
+```
+
+Audio is flushed to the response as it's produced instead of buffered first. Only `espeak-ng` supports this today (`stream: true` against `omnivoice` just falls back to the buffered response) — see [`docs/api.md`](docs/api.md#streaming-stream-true).
+
 ## List voices
 
 ```bash

@@ -29,6 +29,11 @@ type Config struct {
 	RequestTimeout  time.Duration
 	// Queue schedules and executes synthesis jobs. Required.
 	Queue *queue.Manager
+	// StreamWorkers bounds concurrent streaming requests per provider ID.
+	// This is independent of Queue's worker pools — streaming bypasses the
+	// queue entirely since it's tied to one live connection rather than a
+	// poll-able job. Providers not listed (or with a value <= 0) get 1.
+	StreamWorkers map[string]int
 }
 
 type Server struct {
@@ -38,6 +43,7 @@ type Server struct {
 	maxInputChars   int
 	requestTimeout  time.Duration
 	queue           *queue.Manager
+	streamSem       map[string]chan struct{}
 }
 
 func New(cfg Config) (*Server, error) {
@@ -71,6 +77,14 @@ func New(cfg Config) (*Server, error) {
 	if cfg.RequestTimeout <= 0 {
 		cfg.RequestTimeout = defaultRequestTimeout
 	}
+	streamSem := make(map[string]chan struct{}, len(providers))
+	for id := range providers {
+		workers := cfg.StreamWorkers[id]
+		if workers <= 0 {
+			workers = 1
+		}
+		streamSem[id] = make(chan struct{}, workers)
+	}
 	return &Server{
 		providers:       providers,
 		defaultProvider: cfg.DefaultProvider,
@@ -78,6 +92,7 @@ func New(cfg Config) (*Server, error) {
 		maxInputChars:   cfg.MaxInputChars,
 		requestTimeout:  cfg.RequestTimeout,
 		queue:           cfg.Queue,
+		streamSem:       streamSem,
 	}, nil
 }
 
@@ -133,6 +148,14 @@ func (s *Server) speech(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Stream {
+		if streamer, ok := p.(provider.Streamer); ok {
+			s.streamSpeech(w, r, req, p.ID(), streamer)
+			return
+		}
+		// Provider can't stream — fall through to the buffered path below.
+	}
+
 	job, err := s.queue.Submit(p.ID(), req)
 	if err != nil {
 		writeProviderError(w, err)
@@ -153,9 +176,66 @@ func (s *Server) speech(w http.ResponseWriter, r *http.Request) {
 	writeAudio(w, finished.Result)
 }
 
+// streamSpeech writes audio progressively as the provider produces it.
+// Unlike the buffered/job paths, this ties execution to the live HTTP
+// connection: if the client disconnects or the request times out, the
+// underlying synthesis is genuinely cancelled — there's no queued job or
+// other consumer waiting on this output. It also bypasses queue.Manager
+// entirely, gated instead by a small per-provider semaphore sized from
+// Config.StreamWorkers.
+func (s *Server) streamSpeech(w http.ResponseWriter, r *http.Request, req provider.SpeechRequest, providerID string, streamer provider.Streamer) {
+	ctx, cancel := context.WithTimeout(r.Context(), s.requestTimeout)
+	defer cancel()
+
+	sem := s.streamSem[providerID]
+	select {
+	case sem <- struct{}{}:
+		defer func() { <-sem }()
+	case <-ctx.Done():
+		writeProviderError(w, ctx.Err())
+		return
+	}
+
+	fw := &flushWriter{w: w}
+	err := streamer.SynthesizeStream(ctx, req, func(meta provider.StreamMeta) {
+		w.Header().Set("Content-Type", meta.ContentType)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-TTS-Provider", meta.ProviderID)
+		w.Header().Set("X-TTS-Model", meta.Model)
+		w.Header().Set("X-TTS-Voice", meta.Voice)
+		w.Header().Set("X-TTS-Format", meta.Format)
+		w.WriteHeader(http.StatusOK)
+	}, fw)
+	if err != nil && !fw.headerWritten {
+		// Nothing sent yet — still safe to write a normal error response.
+		writeProviderError(w, err)
+	}
+	// If headers/bytes were already flushed, there's nothing left to do on
+	// error: the client already has a 200 with a truncated body. Chunked
+	// transfer encoding surfaces this as a short read on the client side.
+}
+
+type flushWriter struct {
+	w             http.ResponseWriter
+	headerWritten bool
+}
+
+func (fw *flushWriter) Write(p []byte) (int, error) {
+	fw.headerWritten = true
+	n, err := fw.w.Write(p)
+	if f, ok := fw.w.(http.Flusher); ok {
+		f.Flush()
+	}
+	return n, err
+}
+
 func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	req, p, ok := s.decodeAndRoute(w, r)
 	if !ok {
+		return
+	}
+	if req.Stream {
+		writeError(w, http.StatusBadRequest, errors.New("stream is not supported for async jobs; use POST /v1/audio/speech"))
 		return
 	}
 

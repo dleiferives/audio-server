@@ -93,6 +93,7 @@ jobs and any later poll depend on it completing.
 | `response_format` | string | no | `mp3` (default) or `wav`. |
 | `speed` | float | no | Playback speed multiplier. Range 0.25–4.0. |
 | `provider_options` | object | no | Provider-specific settings, opaque to the server and validated only by the resolved provider. See [`docs/providers.md`](providers.md) for each provider's schema (e.g. OmniVoice's `steps`, `seed`, `chunk_seconds`, `chunk_threshold`). Unknown fields within it are rejected by the provider, not the server. |
+| `stream` | boolean | no | Stream audio progressively instead of buffering the full result. Only honored if the resolved provider supports it (currently `espeak-ng` only) — otherwise silently falls back to the buffered response below. See "Streaming" below. |
 
 **Response 200** — audio bytes with headers:
 
@@ -116,6 +117,19 @@ jobs and any later poll depend on it completing.
 | 503 | Provider unavailable or synthesis failed |
 | 504 | Timed out waiting for the job (the job itself may still complete in the background) |
 
+#### Streaming (`"stream": true`)
+
+```bash
+curl -sS --no-buffer http://127.0.0.1:8010/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -d '{"input":"a longer piece of text ...","voice":"en-us","response_format":"mp3","stream":true}' \
+  --output out.mp3
+```
+
+When streaming is used, audio bytes are written and flushed to the response as they're produced — playback can start before generation finishes, instead of waiting for the whole file. Behavior differs from the buffered path in one important way: **streaming bypasses the job queue entirely** and is tied directly to this HTTP connection, so if the client disconnects or the request times out, synthesis is actually cancelled (there's no other consumer waiting on a streamed response, unlike a queued job). Headers (`X-TTS-*`, `Content-Type`) are still sent up front, before any audio bytes, since voice/format are resolved synchronously from the request.
+
+If the resolved provider doesn't support streaming (e.g. `omnivoice`), `stream` is silently ignored and the normal buffered response is returned instead.
+
 ---
 
 ### `POST /v1/audio/jobs`
@@ -126,7 +140,9 @@ connection open, which matters most for slow GPU-bound providers like
 OmniVoice.
 
 **Request body:** identical to `POST /v1/audio/speech` (see above), including
-`provider_options`.
+`provider_options`. **`stream` is not supported here** — jobs are fetch-after-done
+by design, and a `stream: true` job request returns `400`. Use
+`POST /v1/audio/speech` for streaming.
 
 **Response 202**
 ```json

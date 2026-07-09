@@ -41,6 +41,12 @@ Jobs are tracked in memory only (map keyed by job ID); finished jobs are swept a
 
 **Behavior note:** a job runs to completion independent of any specific HTTP caller. If `/v1/audio/speech`'s wait times out (504) or the client disconnects, the underlying `Synthesize` call is *not* cancelled — other queued jobs and later polls via `/v1/audio/jobs/{id}` depend on it finishing. `Synthesize` itself is still bounded by `AUDIO_REQUEST_TIMEOUT_SECONDS` (applied as the job's own execution timeout), so a wedged provider can't block its worker forever.
 
+## Streaming
+
+`"stream": true` on `POST /v1/audio/speech` takes a deliberately different path from everything above: it bypasses `internal/queue` entirely. The queue model — poll-able jobs, detached execution, GPU lifecycle — exists for async multi-consumer work; a stream is none of those things, it's one live HTTP connection with exactly one consumer. So `server.streamSpeech` calls `provider.Streamer.SynthesizeStream` directly from the request-handling goroutine, gated by its own small per-provider semaphore (`Config.StreamWorkers`, sized the same as the provider's queue workers so total concurrent espeak-ng subprocesses stays bounded). Unlike queued jobs, a stream's context *is* `r.Context()` bounded by `AUDIO_REQUEST_TIMEOUT_SECONDS` — disconnecting the client or hitting the timeout genuinely cancels synthesis, which is correct here since nothing else is waiting on the output.
+
+Only `espeak-ng` implements `provider.Streamer` today (see `docs/providers.md`); `omnivoice` doesn't, so `stream: true` against it silently falls back to the buffered path.
+
 ## Testability
 
 `internal/run` defines a `Command` function type that wraps `os/exec`. Tests replace it with a stub, so provider tests never spawn real processes.

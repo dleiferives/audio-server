@@ -26,6 +26,16 @@ type Lifecycle interface {
 
 Providers with an expensive resource to manage (a GPU-resident model) can implement this. The queue manager calls `Warm` before the first job dispatched to a cold provider, and `Idle` after that provider's queue has been empty for its configured idle-unload delay — so the model loads once and stays loaded across a run of back-to-back jobs, rather than reloading per request. Providers that don't implement it (like `espeak-ng`) are unaffected — the manager just skips the lifecycle calls.
 
+### Optional: `provider.Streamer`
+
+```go
+type Streamer interface {
+    SynthesizeStream(ctx context.Context, req SpeechRequest, onHeader func(StreamMeta), w io.Writer) error
+}
+```
+
+Providers that can produce audio progressively (rather than only a complete buffer) can implement this to support `"stream": true` on `POST /v1/audio/speech`. Unlike `Synthesize`, this bypasses `internal/queue` entirely — streaming is tied to one live HTTP connection, not a poll-able job, so it's gated by its own small per-provider concurrency limit (`Config.StreamWorkers` in `internal/server`) instead. `SynthesizeStream` must call `onHeader` exactly once, before writing any bytes to `w` — voice/format are resolved synchronously from the request, so this doesn't require waiting on the actual audio. `espeak-ng` implements this; `omnivoice` doesn't (a diffusion model producing one complete waveform has no natural incremental output today) — a `stream: true` request routed to a non-streaming provider silently falls back to the buffered response.
+
 ## espeak-ng
 
 **ID:** `espeak-ng`  
@@ -58,10 +68,15 @@ The espeak provider accepts any `Encoder` implementation:
 type Encoder interface {
     Health(ctx context.Context) error
     Encode(ctx context.Context, wav []byte, format string) ([]byte, string, error)
+    EncodeStream(ctx context.Context, wav io.Reader, format string, w io.Writer) (string, error)
 }
 ```
 
 The shipped implementation is `FFmpeg` (`internal/encode/ffmpeg.go`).
+
+### Streaming
+
+`espeak-ng` implements `provider.Streamer`. For `wav`, espeak-ng's stdout is piped directly to the response via `run.ExecStream` — no buffering at all. For `mp3`, espeak-ng's stdout feeds `ffmpeg`'s stdin through an `io.Pipe` (via `Encoder.EncodeStream`) while `ffmpeg`'s stdout feeds the response, both running concurrently — matching the shape of the buffered path (`Encode`) but without materializing either the WAV or MP3 bytes in memory first.
 
 ## omnivoice
 

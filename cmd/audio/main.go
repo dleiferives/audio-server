@@ -70,6 +70,7 @@ func main() {
 		MaxInputChars:   *maxInputChars,
 		RequestTimeout:  requestTimeout,
 		Queue:           jobQueue,
+		StreamWorkers:   workers,
 	})
 	if err != nil {
 		log.Fatalf("audio server: %v", err)
