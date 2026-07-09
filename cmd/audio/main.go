@@ -19,6 +19,7 @@ import (
 	"github.com/dleiferives/audio-server/internal/provider"
 	"github.com/dleiferives/audio-server/internal/provider/espeak"
 	"github.com/dleiferives/audio-server/internal/provider/omnivoice"
+	"github.com/dleiferives/audio-server/internal/queue"
 	"github.com/dleiferives/audio-server/internal/server"
 )
 
@@ -34,21 +35,41 @@ func main() {
 	defaultProvider := flag.String("default-provider", env("AUDIO_DEFAULT_PROVIDER", "espeak-ng"), "default provider id")
 	defaultVoice := flag.String("espeak-default-voice", env("AUDIO_ESPEAK_DEFAULT_VOICE", "en"), "default eSpeak voice")
 	omnivoiceAddr := flag.String("omnivoice-addr", env("AUDIO_OMNIVOICE_ADDR", ""), "OmniVoice sidecar base URL (e.g. http://127.0.0.1:8020); disabled when blank")
+	omnivoiceConcurrency := flag.Int("omnivoice-concurrency", envInt("AUDIO_OMNIVOICE_CONCURRENCY", 1), "concurrent OmniVoice workers (keep at 1 on limited VRAM)")
+	omnivoiceIdleUnloadSeconds := flag.Int("omnivoice-idle-unload-seconds", envInt("AUDIO_OMNIVOICE_IDLE_UNLOAD_SECONDS", 30), "seconds an empty OmniVoice queue waits before the model is unloaded")
 	flag.Parse()
 
 	encoder := encode.NewFFmpeg(*ffmpegPath, *mp3Bitrate)
 	espeakProvider := espeak.New(*espeakPath, *defaultVoice, encoder)
 	providers := []provider.Provider{espeakProvider}
+	workers := map[string]int{espeakProvider.ID(): *maxConcurrency}
+	idleUnload := map[string]time.Duration{}
 	if strings.TrimSpace(*omnivoiceAddr) != "" {
-		providers = append(providers, omnivoice.New(*omnivoiceAddr, nil))
+		omnivoiceProvider := omnivoice.New(*omnivoiceAddr, nil)
+		providers = append(providers, omnivoiceProvider)
+		workers[omnivoiceProvider.ID()] = *omnivoiceConcurrency
+		idleUnload[omnivoiceProvider.ID()] = time.Duration(*omnivoiceIdleUnloadSeconds) * time.Second
 	}
+
+	providerMap := make(map[string]provider.Provider, len(providers))
+	for _, p := range providers {
+		providerMap[p.ID()] = p
+	}
+	requestTimeout := time.Duration(*requestTimeoutSeconds) * time.Second
+	jobQueue := queue.NewManager(queue.Config{
+		Providers:         providerMap,
+		Workers:           workers,
+		IdleUnload:        idleUnload,
+		SynthesizeTimeout: requestTimeout,
+	})
+
 	audioServer, err := server.New(server.Config{
 		Providers:       providers,
 		DefaultProvider: *defaultProvider,
 		APIKey:          *apiKey,
 		MaxInputChars:   *maxInputChars,
-		MaxConcurrency:  *maxConcurrency,
-		RequestTimeout:  time.Duration(*requestTimeoutSeconds) * time.Second,
+		RequestTimeout:  requestTimeout,
+		Queue:           jobQueue,
 	})
 	if err != nil {
 		log.Fatalf("audio server: %v", err)

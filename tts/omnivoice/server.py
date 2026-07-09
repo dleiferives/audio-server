@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Minimal HTTP sidecar exposing OmniVoice over POST /synthesize and GET /voices.
+"""Minimal HTTP sidecar exposing OmniVoice over HTTP.
 
-The Go audio server talks to this process over HTTP instead of shelling out
-to a script per request, so the (slow) model load happens once at startup.
+The Go audio server's job queue owns scheduling and VRAM lifecycle
+decisions; this sidecar just does what it's told: POST /load loads the
+model, POST /unload frees it, POST /synthesize generates audio (lazily
+loading first if needed), GET /voices and GET /health report state.
 """
 
 from __future__ import annotations
@@ -54,22 +56,48 @@ def seed_everything(seed: int) -> None:
 
 
 class Engine:
-    """Loads the OmniVoice model once and serializes access to it.
+    """Lazily loads the OmniVoice model and serializes all access to it.
 
-    The underlying diffusion model is not known to be safe for concurrent
-    calls from multiple threads, so a lock serializes generation.
+    The Go queue manager calls load()/unload() explicitly around batches of
+    work so the model isn't reloaded between back-to-back requests, but
+    synthesize() also loads on demand so the sidecar works correctly even
+    when called directly. The same lock guards load, unload, and generate
+    so a load/unload can never race with an in-flight generation, and the
+    underlying diffusion model (not known to be thread-safe) never sees
+    concurrent calls.
     """
 
     def __init__(self, model_id: str, device: str) -> None:
+        self.model_id = model_id
         self.device = choose_device(device)
         self.dtype = torch.float32 if self.device == "cpu" else torch.float16
         self.lock = threading.Lock()
-        print(f"loading {model_id} on {self.device}...", file=sys.stderr)
-        self.model = OmniVoice.from_pretrained(model_id, device_map=self.device, dtype=self.dtype)
-        print("model loaded", file=sys.stderr)
+        self.model: OmniVoice | None = None
+
+    def is_loaded(self) -> bool:
+        return self.model is not None
+
+    def load(self) -> None:
+        with self.lock:
+            if self.model is not None:
+                return
+            print(f"loading {self.model_id} on {self.device}...", file=sys.stderr)
+            self.model = OmniVoice.from_pretrained(self.model_id, device_map=self.device, dtype=self.dtype)
+            print("model loaded", file=sys.stderr)
+
+    def unload(self) -> None:
+        with self.lock:
+            if self.model is None:
+                return
+            del self.model
+            self.model = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            print("model unloaded", file=sys.stderr)
 
     def synthesize(self, text: str, language: str, steps: int, speed: float, seed: int,
                    chunk_seconds: float, chunk_threshold: float) -> tuple[bytes, int]:
+        self.load()
         seed_everything(seed)
         with self.lock:
             audio = self.model.generate(
@@ -80,9 +108,10 @@ class Engine:
                 audio_chunk_duration=chunk_seconds,
                 audio_chunk_threshold=chunk_threshold,
             )[0]
+            sample_rate = self.model.sampling_rate
         buf = BytesIO()
-        sf.write(buf, audio, self.model.sampling_rate, format="WAV", subtype="PCM_16")
-        return buf.getvalue(), self.model.sampling_rate
+        sf.write(buf, audio, sample_rate, format="WAV", subtype="PCM_16")
+        return buf.getvalue(), sample_rate
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -104,7 +133,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path.rstrip("/") in ("", "/health"):
-            self._send_json(200, {"status": "ok"})
+            self._send_json(200, {"status": "ok", "model_loaded": self.engine.is_loaded()})
             return
         if self.path.startswith("/voices"):
             self._send_json(200, {"voices": VOICES})
@@ -112,6 +141,23 @@ class Handler(BaseHTTPRequestHandler):
         self._send_error_json(404, "not found")
 
     def do_POST(self) -> None:  # noqa: N802
+        if self.path.startswith("/load"):
+            try:
+                self.engine.load()
+            except torch.OutOfMemoryError:
+                self._send_error_json(503, "GPU ran out of memory while loading the model")
+                return
+            except Exception as exc:  # noqa: BLE001 - report to caller instead of crashing sidecar
+                self._send_error_json(500, str(exc))
+                return
+            self._send_json(200, {"status": "ok", "model_loaded": True})
+            return
+
+        if self.path.startswith("/unload"):
+            self.engine.unload()
+            self._send_json(200, {"status": "ok", "model_loaded": False})
+            return
+
         if not self.path.startswith("/synthesize"):
             self._send_error_json(404, "not found")
             return
@@ -179,12 +225,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=int(os.environ.get("OMNIVOICE_PORT", "8020")))
     parser.add_argument("--model", default=os.environ.get("OMNIVOICE_MODEL", DEFAULT_MODEL_ID))
     parser.add_argument("--device", default=os.environ.get("OMNIVOICE_DEVICE", "auto"))
+    parser.add_argument(
+        "--preload",
+        action="store_true",
+        default=os.environ.get("OMNIVOICE_PRELOAD", "").lower() in ("1", "true", "yes"),
+        help="load the model at startup instead of on first /load or /synthesize call",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    Handler.engine = Engine(args.model, args.device)
+    engine = Engine(args.model, args.device)
+    if args.preload:
+        engine.load()
+    Handler.engine = engine
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"omnivoice sidecar listening on http://{args.host}:{args.port}", file=sys.stderr)
     try:

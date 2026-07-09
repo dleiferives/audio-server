@@ -45,3 +45,14 @@ type Provider interface {
 	Voices(ctx context.Context, language string) ([]Voice, error)
 	Synthesize(ctx context.Context, req SpeechRequest) (SpeechResult, error)
 }
+
+// Lifecycle is an optional interface for providers that manage an expensive
+// resource (e.g. a GPU-resident model). The queue manager calls Warm before
+// dispatching the first job to a cold provider, and Idle after the
+// provider's queue has been empty for a configured duration. Providers that
+// don't need this (e.g. stateless subprocess-based providers) simply don't
+// implement it.
+type Lifecycle interface {
+	Warm(ctx context.Context) error
+	Idle(ctx context.Context) error
+}

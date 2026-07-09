@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dleiferives/audio-server/internal/provider"
+	"github.com/dleiferives/audio-server/internal/queue"
 )
 
 func TestSpeechReturnsProviderAudio(t *testing.T) {
@@ -114,11 +115,89 @@ func TestHealthReportsProviderFailure(t *testing.T) {
 }
 
 func TestProviderTimeout(t *testing.T) {
-	s := newTestServer(t, fakeProvider{blockUntilDone: true}, Config{RequestTimeout: time.Millisecond})
+	// The job keeps running in the background even after the waiting HTTP
+	// request times out — a slow provider no longer gets its Synthesize call
+	// cancelled just because one caller stopped waiting.
+	s := newTestServer(t, fakeProvider{delay: 50 * time.Millisecond}, Config{RequestTimeout: time.Millisecond})
 	resp := request(t, s, http.MethodPost, "/v1/audio/speech", `{"input":"hello"}`, "")
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusGatewayTimeout {
 		t.Fatalf("status = %d, want 504", resp.StatusCode)
+	}
+}
+
+func TestJobLifecycle(t *testing.T) {
+	s := newTestServer(t, fakeProvider{}, Config{})
+
+	resp := request(t, s, http.MethodPost, "/v1/audio/jobs", `{"input":"hello"}`, "")
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("create status = %d, want 202", resp.StatusCode)
+	}
+	var created struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if created.ID == "" {
+		t.Fatal("expected a job id")
+	}
+
+	var status string
+	for i := 0; i < 100; i++ {
+		r := request(t, s, http.MethodGet, "/v1/audio/jobs/"+created.ID, "", "")
+		var body struct {
+			Status string `json:"status"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		r.Body.Close()
+		status = body.Status
+		if status == "succeeded" || status == "failed" {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if status != "succeeded" {
+		t.Fatalf("job status = %q, want succeeded", status)
+	}
+
+	audioResp := request(t, s, http.MethodGet, "/v1/audio/jobs/"+created.ID+"/audio", "", "")
+	defer audioResp.Body.Close()
+	body, _ := io.ReadAll(audioResp.Body)
+	if audioResp.StatusCode != http.StatusOK || string(body) != "ok" {
+		t.Fatalf("unexpected audio response: status=%d body=%q", audioResp.StatusCode, body)
+	}
+}
+
+func TestJobUnknownIDReturns404(t *testing.T) {
+	s := newTestServer(t, fakeProvider{}, Config{})
+	resp := request(t, s, http.MethodGet, "/v1/audio/jobs/nope", "", "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	resp = request(t, s, http.MethodGet, "/v1/audio/jobs/nope/audio", "", "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("audio status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestJobAudioNotReadyReturns409(t *testing.T) {
+	s := newTestServer(t, fakeProvider{delay: 50 * time.Millisecond}, Config{})
+	resp := request(t, s, http.MethodPost, "/v1/audio/jobs", `{"input":"hello"}`, "")
+	var created struct {
+		ID string `json:"id"`
+	}
+	json.NewDecoder(resp.Body).Decode(&created)
+	resp.Body.Close()
+
+	audioResp := request(t, s, http.MethodGet, "/v1/audio/jobs/"+created.ID+"/audio", "", "")
+	audioResp.Body.Close()
+	if audioResp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", audioResp.StatusCode)
 	}
 }
 
@@ -154,6 +233,10 @@ func newTestServer(t *testing.T, p fakeProvider, cfg Config) *Server {
 	if cfg.DefaultProvider == "" {
 		cfg.DefaultProvider = p.id
 	}
+	cfg.Queue = queue.NewManager(queue.Config{
+		Providers: map[string]provider.Provider{p.id: p},
+		Workers:   map[string]int{p.id: 2},
+	})
 	s, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -184,7 +267,7 @@ type fakeProvider struct {
 	voices         []provider.Voice
 	healthErr      error
 	synthesizeErr  error
-	blockUntilDone bool
+	delay          time.Duration
 	synthesizeHook func(provider.SpeechRequest)
 }
 
@@ -210,9 +293,8 @@ func (f fakeProvider) Synthesize(ctx context.Context, req provider.SpeechRequest
 	if strings.TrimSpace(req.ResponseFormat) == "" {
 		return provider.SpeechResult{}, errors.New("response_format was not normalized")
 	}
-	if f.blockUntilDone {
-		<-ctx.Done()
-		return provider.SpeechResult{}, ctx.Err()
+	if f.delay > 0 {
+		time.Sleep(f.delay)
 	}
 	if f.synthesizeErr != nil {
 		return provider.SpeechResult{}, f.synthesizeErr

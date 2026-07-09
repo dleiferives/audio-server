@@ -27,6 +27,44 @@ func jsonResponse(status int, body string) *http.Response {
 	}
 }
 
+func TestWarmCallsLoad(t *testing.T) {
+	var gotPath, gotMethod string
+	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
+		gotPath, gotMethod = req.URL.Path, req.Method
+		return jsonResponse(200, `{"status":"ok"}`), nil
+	}})
+	if err := p.Warm(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/load" || gotMethod != http.MethodPost {
+		t.Fatalf("unexpected request: %s %s", gotMethod, gotPath)
+	}
+}
+
+func TestIdleCallsUnload(t *testing.T) {
+	var gotPath string
+	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
+		gotPath = req.URL.Path
+		return jsonResponse(200, `{"status":"ok"}`), nil
+	}})
+	if err := p.Idle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/unload" {
+		t.Fatalf("unexpected path %s", gotPath)
+	}
+}
+
+func TestWarmSurfacesSidecarError(t *testing.T) {
+	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
+		return jsonResponse(503, `{"error":"out of memory"}`), nil
+	}})
+	err := p.Warm(context.Background())
+	if !errors.Is(err, provider.ErrUnavailable) || !strings.Contains(err.Error(), "out of memory") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestHealthOK(t *testing.T) {
 	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
 		if req.URL.Path != "/health" {

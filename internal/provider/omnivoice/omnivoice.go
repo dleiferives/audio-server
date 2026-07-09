@@ -36,6 +36,11 @@ type Provider struct {
 	Client  HTTPClient
 }
 
+var (
+	_ provider.Provider  = Provider{}
+	_ provider.Lifecycle = Provider{}
+)
+
 func New(baseURL string, client HTTPClient) Provider {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if client == nil {
@@ -111,6 +116,37 @@ func (p Provider) Voices(ctx context.Context, language string) ([]provider.Voice
 		})
 	}
 	return voices, nil
+}
+
+// Warm loads the model into the sidecar, blocking until it's ready.
+// Implements provider.Lifecycle.
+func (p Provider) Warm(ctx context.Context) error {
+	return p.postControl(ctx, "/load")
+}
+
+// Idle releases the sidecar's GPU resources. Implements provider.Lifecycle.
+func (p Provider) Idle(ctx context.Context) error {
+	return p.postControl(ctx, "/unload")
+}
+
+func (p Provider) postControl(ctx context.Context, path string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.BaseURL+path, nil)
+	if err != nil {
+		return fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
+	}
+	resp, err := p.Client.Do(req)
+	if err != nil {
+		return fmt.Errorf("%w: omnivoice sidecar unreachable: %v", provider.ErrUnavailable, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%w: omnivoice %s failed: %s", provider.ErrUnavailable, path, synthesizeErrorDetail(resp.StatusCode, body))
+	}
+	return nil
 }
 
 type synthesizeRequest struct {

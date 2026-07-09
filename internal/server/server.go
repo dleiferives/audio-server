@@ -13,11 +13,11 @@ import (
 	"unicode/utf8"
 
 	"github.com/dleiferives/audio-server/internal/provider"
+	"github.com/dleiferives/audio-server/internal/queue"
 )
 
 const (
 	defaultMaxInputChars  = 5000
-	defaultMaxConcurrency = 2
 	defaultRequestTimeout = 30 * time.Second
 )
 
@@ -26,8 +26,9 @@ type Config struct {
 	DefaultProvider string
 	APIKey          string
 	MaxInputChars   int
-	MaxConcurrency  int
 	RequestTimeout  time.Duration
+	// Queue schedules and executes synthesis jobs. Required.
+	Queue *queue.Manager
 }
 
 type Server struct {
@@ -36,12 +37,15 @@ type Server struct {
 	apiKey          string
 	maxInputChars   int
 	requestTimeout  time.Duration
-	sem             chan struct{}
+	queue           *queue.Manager
 }
 
 func New(cfg Config) (*Server, error) {
 	if len(cfg.Providers) == 0 {
 		return nil, errors.New("at least one audio provider is required")
+	}
+	if cfg.Queue == nil {
+		return nil, errors.New("a queue manager is required")
 	}
 	providers := make(map[string]provider.Provider, len(cfg.Providers))
 	for _, p := range cfg.Providers {
@@ -64,9 +68,6 @@ func New(cfg Config) (*Server, error) {
 	if cfg.MaxInputChars <= 0 {
 		cfg.MaxInputChars = defaultMaxInputChars
 	}
-	if cfg.MaxConcurrency <= 0 {
-		cfg.MaxConcurrency = defaultMaxConcurrency
-	}
 	if cfg.RequestTimeout <= 0 {
 		cfg.RequestTimeout = defaultRequestTimeout
 	}
@@ -76,7 +77,7 @@ func New(cfg Config) (*Server, error) {
 		apiKey:          cfg.APIKey,
 		maxInputChars:   cfg.MaxInputChars,
 		requestTimeout:  cfg.RequestTimeout,
-		sem:             make(chan struct{}, cfg.MaxConcurrency),
+		queue:           cfg.Queue,
 	}, nil
 }
 
@@ -85,6 +86,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /v1/audio/voices", s.auth(s.voices))
 	mux.HandleFunc("POST /v1/audio/speech", s.auth(s.speech))
+	mux.HandleFunc("POST /v1/audio/jobs", s.auth(s.createJob))
+	mux.HandleFunc("GET /v1/audio/jobs/{id}", s.auth(s.getJob))
+	mux.HandleFunc("GET /v1/audio/jobs/{id}/audio", s.auth(s.getJobAudio))
 	return mux
 }
 
@@ -124,6 +128,99 @@ func (s *Server) voices(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) speech(w http.ResponseWriter, r *http.Request) {
+	req, p, ok := s.decodeAndRoute(w, r)
+	if !ok {
+		return
+	}
+
+	job, err := s.queue.Submit(p.ID(), req)
+	if err != nil {
+		writeProviderError(w, err)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), s.requestTimeout)
+	defer cancel()
+	finished, err := s.queue.Wait(ctx, job.ID)
+	if err != nil {
+		writeProviderError(w, err)
+		return
+	}
+	if finished.Status == queue.StatusFailed {
+		writeProviderError(w, finished.Err)
+		return
+	}
+	writeAudio(w, finished.Result)
+}
+
+func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
+	req, p, ok := s.decodeAndRoute(w, r)
+	if !ok {
+		return
+	}
+
+	job, err := s.queue.Submit(p.ID(), req)
+	if err != nil {
+		writeProviderError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, s.jobStatusBody(job.ID))
+}
+
+func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, ok := s.queue.Get(id); !ok {
+		writeError(w, http.StatusNotFound, errors.New("unknown job id"))
+		return
+	}
+	writeJSON(w, http.StatusOK, s.jobStatusBody(id))
+}
+
+func (s *Server) getJobAudio(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	job, ok := s.queue.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, errors.New("unknown job id"))
+		return
+	}
+	switch job.Status {
+	case queue.StatusSucceeded:
+		writeAudio(w, job.Result)
+	case queue.StatusFailed:
+		writeError(w, http.StatusNotFound, fmt.Errorf("job failed: %v", job.Err))
+	default:
+		writeError(w, http.StatusConflict, errors.New("job is not finished yet"))
+	}
+}
+
+func (s *Server) jobStatusBody(id string) map[string]any {
+	job, _ := s.queue.Get(id)
+	body := map[string]any{
+		"id":             job.ID,
+		"status":         job.Status,
+		"provider":       job.ProviderID,
+		"created_at":     job.CreatedAt,
+		"queue_position": 0,
+	}
+	if job.Status == queue.StatusQueued {
+		body["queue_position"] = s.queue.Position(id)
+	}
+	if !job.StartedAt.IsZero() {
+		body["started_at"] = job.StartedAt
+	}
+	if !job.FinishedAt.IsZero() {
+		body["finished_at"] = job.FinishedAt
+	}
+	if job.Status == queue.StatusFailed && job.Err != nil {
+		body["error"] = job.Err.Error()
+	}
+	return body
+}
+
+// decodeAndRoute decodes and validates the speech request body and resolves
+// the provider it should run on. On failure it writes the error response and
+// returns ok=false.
+func (s *Server) decodeAndRoute(w http.ResponseWriter, r *http.Request) (provider.SpeechRequest, provider.Provider, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, int64(s.maxInputChars*4+4096))
 	defer r.Body.Close()
 
@@ -132,38 +229,27 @@ func (s *Server) speech(w http.ResponseWriter, r *http.Request) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
-		return
+		return provider.SpeechRequest{}, nil, false
 	}
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		writeError(w, http.StatusBadRequest, errors.New("request body must contain one JSON object"))
-		return
+		return provider.SpeechRequest{}, nil, false
 	}
 	if err := s.validateSpeech(req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
-		return
+		return provider.SpeechRequest{}, nil, false
 	}
 	req.ResponseFormat = normalizedFormat(req.ResponseFormat)
 
 	p, ok := s.providerFor(req.Model, req.Language)
 	if !ok {
 		writeError(w, http.StatusBadRequest, errors.New("unknown audio model"))
-		return
+		return provider.SpeechRequest{}, nil, false
 	}
+	return req, p, true
+}
 
-	ctx, cancel := context.WithTimeout(r.Context(), s.requestTimeout)
-	defer cancel()
-	if err := s.acquire(ctx); err != nil {
-		writeProviderError(w, err)
-		return
-	}
-	defer s.release()
-
-	result, err := p.Synthesize(ctx, req)
-	if err != nil {
-		writeProviderError(w, err)
-		return
-	}
-
+func writeAudio(w http.ResponseWriter, result provider.SpeechResult) {
 	w.Header().Set("Content-Type", result.ContentType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-TTS-Provider", result.ProviderID)
@@ -217,19 +303,6 @@ func (s *Server) providerFor(model, language string) (provider.Provider, bool) {
 func normalizeLanguage(language string) string {
 	language = strings.ToLower(strings.TrimSpace(language))
 	return strings.ReplaceAll(language, "_", "-")
-}
-
-func (s *Server) acquire(ctx context.Context) error {
-	select {
-	case s.sem <- struct{}{}:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (s *Server) release() {
-	<-s.sem
 }
 
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {

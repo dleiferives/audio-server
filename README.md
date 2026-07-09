@@ -40,6 +40,19 @@ curl -sS http://127.0.0.1:8010/v1/audio/speech \
   --output /tmp/out.mp3
 ```
 
+## Generate speech asynchronously (queue + poll)
+
+```bash
+JOB=$(curl -sS http://127.0.0.1:8010/v1/audio/jobs \
+  -d '{"input":"hello","voice":"en-us","response_format":"wav"}')
+ID=$(python3 -c "import sys,json;print(json.load(sys.stdin)['id'])" <<< "$JOB")
+
+curl -sS http://127.0.0.1:8010/v1/audio/jobs/$ID          # status + queue_position
+curl -sS http://127.0.0.1:8010/v1/audio/jobs/$ID/audio -o out.wav  # once status is "succeeded"
+```
+
+See [`docs/api.md`](docs/api.md) for the full job API — this is the one to use if you want visibility into queue position instead of just blocking on `/v1/audio/speech`.
+
 ## List voices
 
 ```bash
@@ -67,6 +80,8 @@ curl -sS http://127.0.0.1:8010/healthz
 | `AUDIO_MP3_BITRATE` | `48k` | MP3 bitrate |
 | `AUDIO_DEFAULT_PROVIDER` | `espeak-ng` | provider used for `auto`, `tts-1`, and blank model |
 | `AUDIO_OMNIVOICE_ADDR` | _(empty)_ | OmniVoice sidecar base URL, e.g. `http://127.0.0.1:8020`; provider disabled when blank |
+| `AUDIO_OMNIVOICE_CONCURRENCY` | `1` | concurrent OmniVoice workers — keep at 1 on a single GPU with limited VRAM |
+| `AUDIO_OMNIVOICE_IDLE_UNLOAD_SECONDS` | `30` | seconds an empty OmniVoice queue waits before the model is unloaded from VRAM |
 
 All flags are also available as CLI flags — run `./bin/audio-server -help` for the full list.
 

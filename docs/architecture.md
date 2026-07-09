@@ -3,11 +3,12 @@
 ## Overview
 
 ```
-cmd/audio/main.go          — binary entry point, wires config + providers
-internal/server/           — HTTP server, routing, auth, concurrency semaphore
-internal/provider/         — Provider interface + shared types
+cmd/audio/main.go          — binary entry point, wires config + providers + queue
+internal/server/           — HTTP server, routing, auth
+internal/queue/             — per-provider job queue, worker pools, GPU model lifecycle
+internal/provider/         — Provider (+ optional Lifecycle) interface + shared types
 internal/provider/espeak/    — espeak-ng subprocess provider
-internal/provider/omnivoice/ — OmniVoice HTTP sidecar client provider
+internal/provider/omnivoice/ — OmniVoice HTTP sidecar client provider (implements Lifecycle)
 internal/encode/             — ffmpeg WAV→MP3 encoder
 internal/run/                — thin subprocess abstraction (testable Command type)
 tts/espeak-ng/                — espeak-ng setup notes (no code, system binary only)
@@ -17,20 +18,28 @@ tts/omnivoice/                — OmniVoice HTTP sidecar (server.py) + standalon
 ## Request flow
 
 ```
-POST /v1/audio/speech
-  → auth middleware (bearer token / X-API-Key)
-  → semaphore acquire (AUDIO_MAX_CONCURRENCY slots)
-  → context timeout (AUDIO_REQUEST_TIMEOUT_SECONDS)
-  → server.providerFor(model, language) — resolves OpenAI aliases / language to provider ID
-  → provider.Synthesize(ctx, req)
-       espeak-ng: shell out → WAV bytes → ffmpeg encode → MP3 bytes
-       omnivoice: HTTP POST to sidecar → WAV bytes
-  → write audio bytes + X-TTS-* response headers
+POST /v1/audio/speech                      POST /v1/audio/jobs
+  → auth middleware                          → auth middleware
+  → decode + validate request                → decode + validate request
+  → server.providerFor(model, language)       → server.providerFor(model, language)
+  → queue.Submit(providerID, req)             → queue.Submit(providerID, req) — returns immediately
+  → queue.Wait(ctx, jobID)                        │
+       bounded by AUDIO_REQUEST_TIMEOUT_SECONDS    ▼
+  → write audio bytes + X-TTS-* headers       GET /v1/audio/jobs/{id}        → poll status + queue_position
+                                               GET /v1/audio/jobs/{id}/audio  → fetch result once succeeded
 ```
 
-## Concurrency model
+Both entry points submit to the same `queue.Manager`; `/v1/audio/speech` just also blocks on `Wait` so simple/fast callers (espeak-ng) don't need to poll. See `docs/api.md` for the job endpoint contracts.
 
-A channel-based semaphore in `server.Server` limits simultaneous synthesis processes. Requests that cannot acquire a slot wait on the request context and return 504 on timeout.
+## Queue and GPU model lifecycle
+
+`internal/queue.Manager` gives each provider ID its own FIFO queue and a fixed-size worker pool (`AUDIO_MAX_CONCURRENCY` for espeak-ng, `AUDIO_OMNIVOICE_CONCURRENCY` for OmniVoice — default 1, since a single 4GB GPU can't run concurrent diffusion jobs). A worker just pulls the next job off its provider's queue and calls the unchanged `provider.Synthesize`; because it doesn't do anything between back-to-back jobs, a queue with several pending OmniVoice requests never reloads the model between them.
+
+For providers with an expensive resource to manage, `provider.Lifecycle` (`Warm`/`Idle`) lets the manager load the model before the first job after an idle period and unload it after the queue has been empty for `AUDIO_OMNIVOICE_IDLE_UNLOAD_SECONDS`. `espeak-ng` doesn't implement it (nothing to warm); `omnivoice` does (`POST /load` / `POST /unload` on the sidecar). A per-provider mutex in the queue manager guarantees a timer-driven `Idle` and a worker-driven `Warm` never run concurrently, so the model can't be unloaded out from under an about-to-start job.
+
+Jobs are tracked in memory only (map keyed by job ID); finished jobs are swept after ~10 minutes. A server restart loses all queued/in-flight/recently-finished jobs — there's no persistence.
+
+**Behavior note:** a job runs to completion independent of any specific HTTP caller. If `/v1/audio/speech`'s wait times out (504) or the client disconnects, the underlying `Synthesize` call is *not* cancelled — other queued jobs and later polls via `/v1/audio/jobs/{id}` depend on it finishing. `Synthesize` itself is still bounded by `AUDIO_REQUEST_TIMEOUT_SECONDS` (applied as the job's own execution timeout), so a wedged provider can't block its worker forever.
 
 ## Testability
 

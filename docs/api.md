@@ -60,7 +60,17 @@ List available voices, optionally filtered by language.
 
 ### `POST /v1/audio/speech`
 
-Synthesize speech from text. Returns raw audio bytes.
+Synthesize speech from text and wait for the result. Returns raw audio bytes.
+
+Internally this submits a job to the same per-provider queue used by
+`/v1/audio/jobs` and blocks until it finishes (bounded by
+`AUDIO_REQUEST_TIMEOUT_SECONDS`). If the provider is busy — e.g. OmniVoice
+processing an earlier request — this call simply waits behind it; use
+`/v1/audio/jobs` instead if you want to see queue position rather than block.
+
+**Note:** if this HTTP request times out or the client disconnects, the job
+keeps running in the background — it isn't cancelled — since other queued
+jobs and any later poll depend on it completing.
 
 **Request body**
 ```json
@@ -104,7 +114,75 @@ Synthesize speech from text. Returns raw audio bytes.
 | 400 | Invalid request, unsupported format, unknown model, or invalid `provider_options` |
 | 401 | Missing or invalid API key (when `AUDIO_API_KEY` is set) |
 | 503 | Provider unavailable or synthesis failed |
-| 504 | Synthesis timed out |
+| 504 | Timed out waiting for the job (the job itself may still complete in the background) |
+
+---
+
+### `POST /v1/audio/jobs`
+
+Submit a synthesis job and return immediately — use this instead of
+`/v1/audio/speech` when you want to see queue position rather than hold a
+connection open, which matters most for slow GPU-bound providers like
+OmniVoice.
+
+**Request body:** identical to `POST /v1/audio/speech` (see above), including
+`provider_options`.
+
+**Response 202**
+```json
+{
+  "id": "d094191e932dd2af2d9569f5417c0158",
+  "status": "queued",
+  "provider": "omnivoice",
+  "created_at": "2026-07-09T00:51:26.388Z",
+  "queue_position": 2
+}
+```
+
+`queue_position` is 1-based among still-queued jobs for that provider; it's
+omitted (implicitly `0`) once the job starts running.
+
+---
+
+### `GET /v1/audio/jobs/{id}`
+
+Poll a job's status.
+
+**Response 200**
+```json
+{
+  "id": "d094191e932dd2af2d9569f5417c0158",
+  "status": "running",
+  "provider": "omnivoice",
+  "created_at": "2026-07-09T00:51:26.388Z",
+  "started_at": "2026-07-09T00:51:26.420Z",
+  "queue_position": 0
+}
+```
+
+| `status` | Meaning |
+|---|---|
+| `queued` | Waiting for a worker; `queue_position` reflects its place in line. |
+| `running` | Actively synthesizing (this also covers OmniVoice model warm-up on a cold start — there's no separate "loading" state). |
+| `succeeded` | Done; fetch audio from `GET /v1/audio/jobs/{id}/audio`. |
+| `failed` | `error` field holds the failure reason. |
+
+**Response 404** — unknown or expired job ID. Finished jobs are retained for
+about 10 minutes before being swept from memory; a server restart also loses
+all jobs (in-memory only, not persisted).
+
+---
+
+### `GET /v1/audio/jobs/{id}/audio`
+
+Fetch the result of a finished job. Same response headers as
+`POST /v1/audio/speech`.
+
+| Status | Condition |
+|---|---|
+| 200 | Job succeeded; audio bytes returned. |
+| 404 | Unknown job ID, or the job failed (see `GET /v1/audio/jobs/{id}` for the error). |
+| 409 | Job exists but hasn't finished yet — poll `GET /v1/audio/jobs/{id}` first. |
 
 ## Authentication
 
