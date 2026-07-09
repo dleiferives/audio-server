@@ -55,6 +55,31 @@ func TestSpeechValidation(t *testing.T) {
 	}
 }
 
+func TestSpeechPassesProviderOptionsThrough(t *testing.T) {
+	var gotOptions string
+	p := fakeProvider{synthesizeHook: func(req provider.SpeechRequest) {
+		gotOptions = string(req.ProviderOptions)
+	}}
+	s := newTestServer(t, p, Config{})
+	resp := request(t, s, http.MethodPost, "/v1/audio/speech", `{"input":"hello","provider_options":{"steps":8}}`, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if gotOptions != `{"steps":8}` {
+		t.Fatalf("provider_options not passed through, got %q", gotOptions)
+	}
+}
+
+func TestSpeechInvalidProviderOptionsReturns400(t *testing.T) {
+	s := newTestServer(t, fakeProvider{synthesizeErr: provider.ErrInvalidRequest}, Config{})
+	resp := request(t, s, http.MethodPost, "/v1/audio/speech", `{"input":"hello","provider_options":{"steps":0}}`, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
 func TestSpeechInputLengthLimit(t *testing.T) {
 	s := newTestServer(t, fakeProvider{}, Config{MaxInputChars: 3})
 	resp := request(t, s, http.MethodPost, "/v1/audio/speech", `{"input":"four"}`, "")
@@ -160,6 +185,7 @@ type fakeProvider struct {
 	healthErr      error
 	synthesizeErr  error
 	blockUntilDone bool
+	synthesizeHook func(provider.SpeechRequest)
 }
 
 func (f fakeProvider) ID() string {
@@ -178,6 +204,9 @@ func (f fakeProvider) Voices(context.Context, string) ([]provider.Voice, error) 
 }
 
 func (f fakeProvider) Synthesize(ctx context.Context, req provider.SpeechRequest) (provider.SpeechResult, error) {
+	if f.synthesizeHook != nil {
+		f.synthesizeHook(req)
+	}
 	if strings.TrimSpace(req.ResponseFormat) == "" {
 		return provider.SpeechResult{}, errors.New("response_format was not normalized")
 	}

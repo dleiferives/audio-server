@@ -2,21 +2,24 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 )
 
 var (
 	ErrUnavailable       = errors.New("audio provider unavailable")
 	ErrUnsupportedFormat = errors.New("audio format unsupported")
+	ErrInvalidRequest    = errors.New("invalid audio request")
 )
 
 type SpeechRequest struct {
-	Model          string  `json:"model"`
-	Input          string  `json:"input"`
-	Voice          string  `json:"voice"`
-	Language       string  `json:"language"`
-	ResponseFormat string  `json:"response_format"`
-	Speed          float64 `json:"speed"`
+	Model           string          `json:"model"`
+	Input           string          `json:"input"`
+	Voice           string          `json:"voice"`
+	Language        string          `json:"language"`
+	ResponseFormat  string          `json:"response_format"`
+	Speed           float64         `json:"speed"`
+	ProviderOptions json.RawMessage `json:"provider_options,omitempty"`
 }
 
 type SpeechResult struct {

@@ -82,6 +82,7 @@ Synthesize speech from text. Returns raw audio bytes.
 | `language` | string | no | BCP-47 language tag. Used as fallback voice when `voice` is blank. |
 | `response_format` | string | no | `mp3` (default) or `wav`. |
 | `speed` | float | no | Playback speed multiplier. Range 0.25–4.0. |
+| `provider_options` | object | no | Provider-specific settings, opaque to the server and validated only by the resolved provider. See [`docs/providers.md`](providers.md) for each provider's schema (e.g. OmniVoice's `steps`, `seed`, `chunk_seconds`, `chunk_threshold`). Unknown fields within it are rejected by the provider, not the server. |
 
 **Response 200** — audio bytes with headers:
 
@@ -100,7 +101,7 @@ Synthesize speech from text. Returns raw audio bytes.
 
 | Status | Condition |
 |---|---|
-| 400 | Invalid request, unsupported format, unknown model |
+| 400 | Invalid request, unsupported format, unknown model, or invalid `provider_options` |
 | 401 | Missing or invalid API key (when `AUDIO_API_KEY` is set) |
 | 503 | Provider unavailable or synthesis failed |
 | 504 | Synthesis timed out |

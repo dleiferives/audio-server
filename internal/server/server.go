@@ -269,7 +269,7 @@ func writeProviderError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		writeError(w, http.StatusGatewayTimeout, err)
-	case errors.Is(err, provider.ErrUnsupportedFormat):
+	case errors.Is(err, provider.ErrUnsupportedFormat), errors.Is(err, provider.ErrInvalidRequest):
 		writeError(w, http.StatusBadRequest, err)
 	case errors.Is(err, provider.ErrUnavailable):
 		writeError(w, http.StatusServiceUnavailable, err)

@@ -100,6 +100,59 @@ func TestSynthesizeSendsRequestAndReturnsWAV(t *testing.T) {
 	if gotBody.Text != "γεια σου" || gotBody.Language != "el" || gotBody.Speed != 1.5 {
 		t.Fatalf("unexpected request body: %+v", gotBody)
 	}
+	if gotBody.Steps != defaultSteps || gotBody.Seed != defaultSeed {
+		t.Fatalf("expected default options, got: %+v", gotBody)
+	}
+}
+
+func TestSynthesizeAppliesProviderOptions(t *testing.T) {
+	var gotBody synthesizeRequest
+	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(req.Body)
+		if err := json.Unmarshal(body, &gotBody); err != nil {
+			t.Fatal(err)
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("RIFF..."))}, nil
+	}})
+
+	_, err := p.Synthesize(context.Background(), provider.SpeechRequest{
+		Input:           "hi",
+		ProviderOptions: json.RawMessage(`{"steps":8,"seed":7,"chunk_seconds":5,"chunk_threshold":9}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotBody.Steps != 8 || gotBody.Seed != 7 || gotBody.ChunkSeconds != 5 || gotBody.ChunkThreshold != 9 {
+		t.Fatalf("provider_options not applied: %+v", gotBody)
+	}
+}
+
+func TestSynthesizeRejectsUnknownProviderOptionField(t *testing.T) {
+	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
+		t.Fatal("should not call sidecar")
+		return nil, nil
+	}})
+	_, err := p.Synthesize(context.Background(), provider.SpeechRequest{
+		Input:           "hi",
+		ProviderOptions: json.RawMessage(`{"stpes":8}`),
+	})
+	if !errors.Is(err, provider.ErrInvalidRequest) {
+		t.Fatalf("expected ErrInvalidRequest, got %v", err)
+	}
+}
+
+func TestSynthesizeRejectsInvalidProviderOptionValues(t *testing.T) {
+	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
+		t.Fatal("should not call sidecar")
+		return nil, nil
+	}})
+	_, err := p.Synthesize(context.Background(), provider.SpeechRequest{
+		Input:           "hi",
+		ProviderOptions: json.RawMessage(`{"steps":0}`),
+	})
+	if !errors.Is(err, provider.ErrInvalidRequest) {
+		t.Fatalf("expected ErrInvalidRequest, got %v", err)
+	}
 }
 
 func TestSynthesizeRejectsNonWAVFormat(t *testing.T) {

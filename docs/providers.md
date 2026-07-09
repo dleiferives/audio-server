@@ -75,6 +75,21 @@ python -m pip install omnivoice==0.1.5
 - `"model": "omnivoice"` routes directly to this provider
 - `"language": "el"` with no explicit model also routes here (see `languageProviders` in `internal/server/server.go`)
 
+### `provider_options`
+
+```json
+{ "steps": 16, "seed": 7, "chunk_seconds": 8, "chunk_threshold": 10 }
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `steps` | int | 32 | Diffusion steps. Fewer steps = faster, lower quality. Must be ≥ 1. |
+| `seed` | int | 42 | Random seed for reproducible generation. |
+| `chunk_seconds` | float | 12.0 | Target duration of chunks used for long text. Must be > 0. |
+| `chunk_threshold` | float | 18.0 | Estimated duration at which long-text chunking starts. Must be > 0. |
+
+Unknown fields or out-of-range values return `400` with `invalid audio request` (`provider.ErrInvalidRequest`) — validated in `internal/provider/omnivoice`, not the core server.
+
 See [`tts/omnivoice/README.md`](../tts/omnivoice/README.md) for the standalone CLI script (`greek_tts.py`), which the sidecar's model-loading logic is based on.
 
 ## Adding a provider
@@ -83,5 +98,6 @@ See [`tts/omnivoice/README.md`](../tts/omnivoice/README.md) for the standalone C
 2. Implement `provider.Provider`
 3. Instantiate in `cmd/audio/main.go` and pass to `server.Config.Providers`
 4. If the provider needs a script, model, or sidecar, put it under `tts/<name>/` (e.g. `tts/omnivoice/`, `tts/espeak-ng/`). Future STT/diarization providers follow the same pattern under `stt/<name>/`.
+5. If the provider has settings beyond the shared `SpeechRequest` fields (voice/language/speed/format), define a provider-owned `Options` struct and decode it from `SpeechRequest.ProviderOptions` (`json.RawMessage`) with `DisallowUnknownFields`. Don't add provider-specific fields to the shared `SpeechRequest` type — see OmniVoice's `steps`/`seed`/`chunk_seconds`/`chunk_threshold` for the pattern.
 
 The server routes requests by provider ID; the default provider handles all OpenAI model aliases.

@@ -123,6 +123,44 @@ type synthesizeRequest struct {
 	ChunkThreshold float64 `json:"chunk_threshold,omitempty"`
 }
 
+// Options holds OmniVoice-specific knobs, sent by the caller in
+// SpeechRequest.ProviderOptions, e.g.:
+//
+//	{"steps": 16, "seed": 7, "chunk_seconds": 8, "chunk_threshold": 10}
+type Options struct {
+	Steps          int     `json:"steps,omitempty"`
+	Seed           int     `json:"seed,omitempty"`
+	ChunkSeconds   float64 `json:"chunk_seconds,omitempty"`
+	ChunkThreshold float64 `json:"chunk_threshold,omitempty"`
+}
+
+func parseOptions(raw json.RawMessage) (Options, error) {
+	opts := Options{
+		Steps:          defaultSteps,
+		Seed:           defaultSeed,
+		ChunkSeconds:   defaultChunkS,
+		ChunkThreshold: defaultChunkTh,
+	}
+	if len(raw) == 0 {
+		return opts, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&opts); err != nil {
+		return Options{}, fmt.Errorf("%w: invalid provider_options: %v", provider.ErrInvalidRequest, err)
+	}
+	if opts.Steps < 1 {
+		return Options{}, fmt.Errorf("%w: provider_options.steps must be at least 1", provider.ErrInvalidRequest)
+	}
+	if opts.ChunkSeconds <= 0 {
+		return Options{}, fmt.Errorf("%w: provider_options.chunk_seconds must be greater than 0", provider.ErrInvalidRequest)
+	}
+	if opts.ChunkThreshold <= 0 {
+		return Options{}, fmt.Errorf("%w: provider_options.chunk_threshold must be greater than 0", provider.ErrInvalidRequest)
+	}
+	return opts, nil
+}
+
 type errorResponse struct {
 	Error string `json:"error"`
 }
@@ -144,15 +182,19 @@ func (p Provider) Synthesize(ctx context.Context, req provider.SpeechRequest) (p
 	if speed <= 0 {
 		speed = defaultSpeed
 	}
+	opts, err := parseOptions(req.ProviderOptions)
+	if err != nil {
+		return provider.SpeechResult{}, err
+	}
 
 	body, err := json.Marshal(synthesizeRequest{
 		Text:           req.Input,
 		Language:       language,
 		Speed:          speed,
-		Steps:          defaultSteps,
-		Seed:           defaultSeed,
-		ChunkSeconds:   defaultChunkS,
-		ChunkThreshold: defaultChunkTh,
+		Steps:          opts.Steps,
+		Seed:           opts.Seed,
+		ChunkSeconds:   opts.ChunkSeconds,
+		ChunkThreshold: opts.ChunkThreshold,
 	})
 	if err != nil {
 		return provider.SpeechResult{}, fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
