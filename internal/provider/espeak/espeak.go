@@ -113,15 +113,12 @@ func (p Provider) Synthesize(ctx context.Context, req provider.SpeechRequest) (p
 // buffering the full result first.
 func (p Provider) SynthesizeStream(ctx context.Context, req provider.SpeechRequest, onHeader func(provider.StreamMeta), w io.Writer) error {
 	format, voice, args := p.buildRequest(req)
-	if format != "wav" && format != "mp3" {
+	contentType, ok := contentTypeForFormat(format)
+	if !ok {
 		return fmt.Errorf("%w: %s", provider.ErrUnsupportedFormat, format)
 	}
-	contentType := "audio/wav"
-	if format == "mp3" {
-		if p.Encoder == nil {
-			return fmt.Errorf("%w: %s", provider.ErrUnsupportedFormat, format)
-		}
-		contentType = "audio/mpeg"
+	if format != "wav" && p.Encoder == nil {
+		return fmt.Errorf("%w: %s", provider.ErrUnsupportedFormat, format)
 	}
 
 	if format == "wav" {
@@ -151,6 +148,26 @@ func (p Provider) SynthesizeStream(ctx context.Context, req provider.SpeechReque
 		return fmt.Errorf("%w: espeak synthesis failed: %s", provider.ErrUnavailable, commandDetail(espeakErr, espeakStderr))
 	}
 	return encErr
+}
+
+// contentTypeForFormat mirrors the formats encode.FFmpeg supports, so
+// headers can be sent before any bytes are written (format validity doesn't
+// depend on the audio itself).
+func contentTypeForFormat(format string) (string, bool) {
+	switch format {
+	case "wav":
+		return "audio/wav", true
+	case "mp3":
+		return "audio/mpeg", true
+	case "ogg":
+		return "audio/ogg", true
+	case "opus":
+		return "audio/ogg; codecs=opus", true
+	case "flac":
+		return "audio/flac", true
+	default:
+		return "", false
+	}
 }
 
 func (p Provider) buildRequest(req provider.SpeechRequest) (format, voice string, args []string) {

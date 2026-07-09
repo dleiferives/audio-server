@@ -41,43 +41,56 @@ func (f FFmpeg) Health(context.Context) error {
 }
 
 func (f FFmpeg) Encode(ctx context.Context, wav []byte, format string) ([]byte, string, error) {
-	switch normalize(format) {
-	case "mp3":
-		stdout, stderr, err := f.runner()(ctx, f.path(), f.mp3Args(), wav)
-		if err != nil {
-			return nil, "", fmt.Errorf("%w: ffmpeg mp3 encode failed: %s", provider.ErrUnavailable, commandDetail(err, stderr))
-		}
-		return stdout, "audio/mpeg", nil
-	default:
+	format = normalize(format)
+	args, contentType, ok := f.argsFor(format)
+	if !ok {
 		return nil, "", fmt.Errorf("%w: %s", provider.ErrUnsupportedFormat, format)
 	}
+	stdout, stderr, err := f.runner()(ctx, f.path(), args, wav)
+	if err != nil {
+		return nil, "", fmt.Errorf("%w: ffmpeg %s encode failed: %s", provider.ErrUnavailable, format, commandDetail(err, stderr))
+	}
+	return stdout, contentType, nil
 }
 
 // EncodeStream is like Encode but streams wav in and the encoded result out,
 // without buffering either fully in memory.
 func (f FFmpeg) EncodeStream(ctx context.Context, wav io.Reader, format string, w io.Writer) (string, error) {
-	switch normalize(format) {
-	case "mp3":
-		stderr, err := f.streamRunner()(ctx, f.path(), f.mp3Args(), wav, w)
-		if err != nil {
-			return "", fmt.Errorf("%w: ffmpeg mp3 stream encode failed: %s", provider.ErrUnavailable, commandDetail(err, stderr))
-		}
-		return "audio/mpeg", nil
-	default:
+	format = normalize(format)
+	args, contentType, ok := f.argsFor(format)
+	if !ok {
 		return "", fmt.Errorf("%w: %s", provider.ErrUnsupportedFormat, format)
 	}
+	stderr, err := f.streamRunner()(ctx, f.path(), args, wav, w)
+	if err != nil {
+		return "", fmt.Errorf("%w: ffmpeg %s stream encode failed: %s", provider.ErrUnavailable, format, commandDetail(err, stderr))
+	}
+	return contentType, nil
 }
 
-func (f FFmpeg) mp3Args() []string {
-	return []string{
+// argsFor returns the ffmpeg args and response Content-Type for a
+// normalized format, or ok=false if the format isn't supported.
+func (f FFmpeg) argsFor(format string) (args []string, contentType string, ok bool) {
+	base := []string{
 		"-hide_banner",
 		"-loglevel", "error",
 		"-f", "wav",
 		"-i", "pipe:0",
 		"-ac", "1",
-		"-b:a", f.bitrate(),
-		"-f", "mp3",
-		"pipe:1",
+	}
+	switch format {
+	case "mp3":
+		return append(base, "-b:a", f.bitrate(), "-f", "mp3", "pipe:1"), "audio/mpeg", true
+	case "ogg":
+		return append(base, "-c:a", "libvorbis", "-b:a", f.bitrate(), "-f", "ogg", "pipe:1"), "audio/ogg", true
+	case "opus":
+		// Opus is carried in an Ogg container; there's no distinct "opus"
+		// muxer, only the libopus encoder writing into the same Ogg format.
+		return append(base, "-c:a", "libopus", "-b:a", f.bitrate(), "-f", "ogg", "pipe:1"), "audio/ogg; codecs=opus", true
+	case "flac":
+		return append(base, "-f", "flac", "pipe:1"), "audio/flac", true
+	default:
+		return nil, "", false
 	}
 }
 

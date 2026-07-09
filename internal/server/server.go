@@ -340,6 +340,14 @@ func writeAudio(w http.ResponseWriter, result provider.SpeechResult) {
 	_, _ = w.Write(result.Audio)
 }
 
+var supportedFormats = map[string]bool{
+	"mp3":  true,
+	"wav":  true,
+	"ogg":  true,
+	"opus": true,
+	"flac": true,
+}
+
 func (s *Server) validateSpeech(req provider.SpeechRequest) error {
 	if strings.TrimSpace(req.Input) == "" {
 		return errors.New("input is required")
@@ -348,8 +356,8 @@ func (s *Server) validateSpeech(req provider.SpeechRequest) error {
 		return fmt.Errorf("input is too long; max %d characters", s.maxInputChars)
 	}
 	format := normalizedFormat(req.ResponseFormat)
-	if format != "mp3" && format != "wav" {
-		return errors.New("response_format must be mp3 or wav")
+	if !supportedFormats[format] {
+		return errors.New("response_format must be one of: mp3, wav, ogg, opus, flac")
 	}
 	if req.Speed != 0 && (req.Speed < 0.25 || req.Speed > 4.0) {
 		return errors.New("speed must be between 0.25 and 4.0")

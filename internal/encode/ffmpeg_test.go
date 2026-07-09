@@ -42,8 +42,43 @@ func TestFFmpegEncodeMP3BuildsCommand(t *testing.T) {
 	}
 }
 
+func TestFFmpegEncodeNewFormatsBuildExpectedArgsAndContentType(t *testing.T) {
+	tests := []struct {
+		format      string
+		contentType string
+		wantArgs    []string
+	}{
+		{"ogg", "audio/ogg", []string{"-hide_banner", "-loglevel", "error", "-f", "wav", "-i", "pipe:0", "-ac", "1", "-c:a", "libvorbis", "-b:a", "64k", "-f", "ogg", "pipe:1"}},
+		{"opus", "audio/ogg; codecs=opus", []string{"-hide_banner", "-loglevel", "error", "-f", "wav", "-i", "pipe:0", "-ac", "1", "-c:a", "libopus", "-b:a", "64k", "-f", "ogg", "pipe:1"}},
+		{"flac", "audio/flac", []string{"-hide_banner", "-loglevel", "error", "-f", "wav", "-i", "pipe:0", "-ac", "1", "-f", "flac", "pipe:1"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.format, func(t *testing.T) {
+			var gotArgs []string
+			f := FFmpeg{
+				Path:    "ffmpeg-test",
+				Bitrate: "64k",
+				Run: func(_ context.Context, name string, args []string, stdin []byte) ([]byte, []byte, error) {
+					gotArgs = append([]string(nil), args...)
+					return []byte("encoded"), nil, nil
+				},
+			}
+			audio, contentType, err := f.Encode(context.Background(), []byte("wav"), tt.format)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(audio) != "encoded" || contentType != tt.contentType {
+				t.Fatalf("unexpected result: audio=%q contentType=%q", audio, contentType)
+			}
+			if !equal(gotArgs, tt.wantArgs) {
+				t.Fatalf("args mismatch:\n got %v\nwant %v", gotArgs, tt.wantArgs)
+			}
+		})
+	}
+}
+
 func TestFFmpegEncodeRejectsUnsupportedFormat(t *testing.T) {
-	_, _, err := NewFFmpeg("", "").Encode(context.Background(), []byte("wav"), "opus")
+	_, _, err := NewFFmpeg("", "").Encode(context.Background(), []byte("wav"), "aac")
 	if !errors.Is(err, provider.ErrUnsupportedFormat) {
 		t.Fatalf("expected unsupported format, got %v", err)
 	}
@@ -95,7 +130,7 @@ func TestFFmpegEncodeStreamBuildsSameArgsAndPipes(t *testing.T) {
 }
 
 func TestFFmpegEncodeStreamRejectsUnsupportedFormat(t *testing.T) {
-	_, err := NewFFmpeg("", "").EncodeStream(context.Background(), strings.NewReader("wav"), "opus", &bytes.Buffer{})
+	_, err := NewFFmpeg("", "").EncodeStream(context.Background(), strings.NewReader("wav"), "aac", &bytes.Buffer{})
 	if !errors.Is(err, provider.ErrUnsupportedFormat) {
 		t.Fatalf("expected unsupported format, got %v", err)
 	}

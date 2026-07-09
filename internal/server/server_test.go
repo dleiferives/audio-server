@@ -43,7 +43,7 @@ func TestSpeechValidation(t *testing.T) {
 	s := newTestServer(t, fakeProvider{}, Config{})
 	tests := []string{
 		`{"input":""}`,
-		`{"input":"hello","response_format":"opus"}`,
+		`{"input":"hello","response_format":"aac"}`,
 		`{"input":"hello","speed":0.1}`,
 		`{"input":"hello","extra":true}`,
 	}

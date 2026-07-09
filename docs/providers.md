@@ -44,7 +44,7 @@ Providers that can produce audio progressively (rather than only a complete buff
 
 See [`tts/espeak-ng/README.md`](../tts/espeak-ng/README.md) for setup notes.
 
-The espeak provider shells out to `espeak-ng --stdin --stdout` to generate WAV, then pipes the result through `ffmpeg` to produce MP3. WAV output is returned directly without encoding.
+The espeak provider shells out to `espeak-ng --stdin --stdout` to generate WAV, then pipes the result through `ffmpeg` to encode `mp3`, `ogg`, `opus`, or `flac`. WAV output is returned directly without encoding.
 
 ### Voice selection
 
@@ -76,7 +76,7 @@ The shipped implementation is `FFmpeg` (`internal/encode/ffmpeg.go`).
 
 ### Streaming
 
-`espeak-ng` implements `provider.Streamer`. For `wav`, espeak-ng's stdout is piped directly to the response via `run.ExecStream` — no buffering at all. For `mp3`, espeak-ng's stdout feeds `ffmpeg`'s stdin through an `io.Pipe` (via `Encoder.EncodeStream`) while `ffmpeg`'s stdout feeds the response, both running concurrently — matching the shape of the buffered path (`Encode`) but without materializing either the WAV or MP3 bytes in memory first.
+`espeak-ng` implements `provider.Streamer`. For `wav`, espeak-ng's stdout is piped directly to the response via `run.ExecStream` — no buffering at all. For any encoded format (`mp3`, `ogg`, `opus`, `flac`), espeak-ng's stdout feeds `ffmpeg`'s stdin through an `io.Pipe` (via `Encoder.EncodeStream`) while `ffmpeg`'s stdout feeds the response, both running concurrently — matching the shape of the buffered path (`Encode`) but without materializing either the WAV or encoded bytes in memory first.
 
 ## omnivoice
 

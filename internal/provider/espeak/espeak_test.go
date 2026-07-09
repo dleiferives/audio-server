@@ -159,6 +159,40 @@ func TestSynthesizeStreamMP3PipesThroughEncoder(t *testing.T) {
 	}
 }
 
+func TestSynthesizeStreamSupportsOggAndFlac(t *testing.T) {
+	for _, tt := range []struct {
+		format      string
+		contentType string
+	}{
+		{"ogg", "audio/ogg"},
+		{"opus", "audio/ogg; codecs=opus"},
+		{"flac", "audio/flac"},
+	} {
+		t.Run(tt.format, func(t *testing.T) {
+			p := New("espeak-test", "en", fakeEncoder{contentType: tt.contentType})
+			p.RunStream = func(_ context.Context, name string, args []string, stdin []byte, w io.Writer) ([]byte, error) {
+				_, _ = w.Write([]byte("wav-bytes"))
+				return nil, nil
+			}
+
+			var meta provider.StreamMeta
+			var out bytes.Buffer
+			err := p.SynthesizeStream(context.Background(), provider.SpeechRequest{
+				Input: "hello", ResponseFormat: tt.format,
+			}, func(m provider.StreamMeta) { meta = m }, &out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if meta.ContentType != tt.contentType || meta.Format != tt.format {
+				t.Fatalf("unexpected meta: %+v", meta)
+			}
+			if out.String() != "encoded:wav-bytes" {
+				t.Fatalf("out = %q", out.String())
+			}
+		})
+	}
+}
+
 func TestSynthesizeStreamEspeakFailurePropagates(t *testing.T) {
 	p := New("espeak-test", "en", nil)
 	p.RunStream = func(context.Context, string, []string, []byte, io.Writer) ([]byte, error) {

@@ -90,7 +90,7 @@ jobs and any later poll depend on it completing.
 | `input` | string | yes | Text to synthesize. Max `AUDIO_MAX_INPUT_CHARS` characters. |
 | `voice` | string | no | Voice name. Provider-specific. Falls back to `AUDIO_ESPEAK_DEFAULT_VOICE`. |
 | `language` | string | no | BCP-47 language tag. Used as fallback voice when `voice` is blank. |
-| `response_format` | string | no | `mp3` (default) or `wav`. |
+| `response_format` | string | no | `mp3` (default), `wav`, `ogg`, `opus`, or `flac`. |
 | `speed` | float | no | Playback speed multiplier. Range 0.25–4.0. |
 | `provider_options` | object | no | Provider-specific settings, opaque to the server and validated only by the resolved provider. See [`docs/providers.md`](providers.md) for each provider's schema (e.g. OmniVoice's `steps`, `seed`, `chunk_seconds`, `chunk_threshold`). Unknown fields within it are rejected by the provider, not the server. |
 | `stream` | boolean | no | Stream audio progressively instead of buffering the full result. Only honored if the resolved provider supports it (currently `espeak-ng` only) — otherwise silently falls back to the buffered response below. See "Streaming" below. |
@@ -99,7 +99,7 @@ jobs and any later poll depend on it completing.
 
 | Header | Description |
 |---|---|
-| `Content-Type` | `audio/mpeg` or `audio/wav` |
+| `Content-Type` | `audio/mpeg`, `audio/wav`, `audio/ogg`, `audio/ogg; codecs=opus`, or `audio/flac` |
 | `X-TTS-Provider` | Provider that handled the request |
 | `X-TTS-Model` | Model/provider ID echoed back |
 | `X-TTS-Voice` | Voice actually used |
