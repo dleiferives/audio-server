@@ -15,13 +15,13 @@ python -m pip install omnivoice==0.1.5
 Generate audio:
 
 ```bash
-./el/greek_tts.py path/to/greek.txt
+./omnivoice/greek_tts.py path/to/greek.txt
 ```
 
 The default output is `path/to/greek.wav`. To choose another path:
 
 ```bash
-./el/greek_tts.py path/to/greek.txt -o output.wav
+./omnivoice/greek_tts.py path/to/greek.txt -o output.wav
 ```
 
 Use `--steps 16` for faster generation or `--speed 1.1` for faster speech.

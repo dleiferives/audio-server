@@ -7,7 +7,7 @@ A standalone audio manager service for TTS generation. Exposes an OpenAI-compati
 | Provider | Type | Status |
 |---|---|---|
 | `espeak-ng` | local subprocess | shipped |
-| OmniVoice (Greek) | local Python / GPU | `tts/el/greek_tts.py` standalone |
+| `omnivoice` | HTTP sidecar (Python / GPU) | shipped, requires `AUDIO_OMNIVOICE_ADDR` |
 
 ## Install runtime tools
 
@@ -66,9 +66,10 @@ curl -sS http://127.0.0.1:8010/healthz
 | `AUDIO_FFMPEG_PATH` | `ffmpeg` | ffmpeg binary path |
 | `AUDIO_MP3_BITRATE` | `48k` | MP3 bitrate |
 | `AUDIO_DEFAULT_PROVIDER` | `espeak-ng` | provider used for `auto`, `tts-1`, and blank model |
+| `AUDIO_OMNIVOICE_ADDR` | _(empty)_ | OmniVoice sidecar base URL, e.g. `http://127.0.0.1:8020`; provider disabled when blank |
 
 All flags are also available as CLI flags — run `./bin/audio-server -help` for the full list.
 
-## Greek TTS
+## OmniVoice (Greek TTS)
 
-See [`tts/el/README.md`](tts/el/README.md) for the standalone OmniVoice-based Greek TTS script.
+See [`docs/providers.md`](docs/providers.md#omnivoice) for the sidecar provider, and [`tts/omnivoice/README.md`](tts/omnivoice/README.md) for the standalone CLI script.

@@ -110,7 +110,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) voices(w http.ResponseWriter, r *http.Request) {
-	p, ok := s.providerFor(r.URL.Query().Get("provider"))
+	p, ok := s.providerFor(r.URL.Query().Get("provider"), r.URL.Query().Get("language"))
 	if !ok {
 		writeError(w, http.StatusBadRequest, errors.New("unknown audio provider"))
 		return
@@ -144,7 +144,7 @@ func (s *Server) speech(w http.ResponseWriter, r *http.Request) {
 	}
 	req.ResponseFormat = normalizedFormat(req.ResponseFormat)
 
-	p, ok := s.providerFor(req.Model)
+	p, ok := s.providerFor(req.Model, req.Language)
 	if !ok {
 		writeError(w, http.StatusBadRequest, errors.New("unknown audio model"))
 		return
@@ -191,15 +191,32 @@ func (s *Server) validateSpeech(req provider.SpeechRequest) error {
 	return nil
 }
 
-func (s *Server) providerFor(model string) (provider.Provider, bool) {
+// languageProviders routes requests to a specific provider by language when
+// no model is given, for providers that only serve one language (e.g.
+// OmniVoice serves Greek). Keyed by normalized BCP-47 language.
+var languageProviders = map[string]string{
+	"el": "omnivoice",
+}
+
+func (s *Server) providerFor(model, language string) (provider.Provider, bool) {
 	model = strings.TrimSpace(model)
 	switch model {
 	case "", "auto", "tts-1", "tts-1-hd", "gpt-4o-mini-tts":
+		if id, ok := languageProviders[normalizeLanguage(language)]; ok {
+			if p, ok := s.providers[id]; ok {
+				return p, true
+			}
+		}
 		return s.providers[s.defaultProvider], true
 	default:
 		p, ok := s.providers[model]
 		return p, ok
 	}
+}
+
+func normalizeLanguage(language string) string {
+	language = strings.ToLower(strings.TrimSpace(language))
+	return strings.ReplaceAll(language, "_", "-")
 }
 
 func (s *Server) acquire(ctx context.Context) error {

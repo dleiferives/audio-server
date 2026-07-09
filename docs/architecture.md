@@ -6,10 +6,12 @@
 cmd/audio/main.go          — binary entry point, wires config + providers
 internal/server/           — HTTP server, routing, auth, concurrency semaphore
 internal/provider/         — Provider interface + shared types
-internal/provider/espeak/  — espeak-ng subprocess provider
-internal/encode/           — ffmpeg WAV→MP3 encoder
-internal/run/              — thin subprocess abstraction (testable Command type)
-tts/el/                    — standalone Python Greek TTS script (OmniVoice)
+internal/provider/espeak/    — espeak-ng subprocess provider
+internal/provider/omnivoice/ — OmniVoice HTTP sidecar client provider
+internal/encode/             — ffmpeg WAV→MP3 encoder
+internal/run/                — thin subprocess abstraction (testable Command type)
+tts/espeak-ng/                — espeak-ng setup notes (no code, system binary only)
+tts/omnivoice/                — OmniVoice HTTP sidecar (server.py) + standalone CLI script
 ```
 
 ## Request flow
@@ -19,9 +21,10 @@ POST /v1/audio/speech
   → auth middleware (bearer token / X-API-Key)
   → semaphore acquire (AUDIO_MAX_CONCURRENCY slots)
   → context timeout (AUDIO_REQUEST_TIMEOUT_SECONDS)
-  → server.providerFor(model) — resolves OpenAI aliases to provider ID
+  → server.providerFor(model, language) — resolves OpenAI aliases / language to provider ID
   → provider.Synthesize(ctx, req)
        espeak-ng: shell out → WAV bytes → ffmpeg encode → MP3 bytes
+       omnivoice: HTTP POST to sidecar → WAV bytes
   → write audio bytes + X-TTS-* response headers
 ```
 
@@ -41,8 +44,8 @@ The `model` field in speech requests is used to select a provider:
 
 | `model` value | Resolves to |
 |---|---|
-| `""`, `auto`, `tts-1`, `tts-1-hd`, `gpt-4o-mini-tts` | default provider |
-| provider ID (e.g. `espeak-ng`) | that provider directly |
+| `""`, `auto`, `tts-1`, `tts-1-hd`, `gpt-4o-mini-tts` | default provider, unless `language` matches a language-specific provider (e.g. `el` → `omnivoice`) |
+| provider ID (e.g. `espeak-ng`, `omnivoice`) | that provider directly |
 | anything else | 400 unknown model |
 
 This keeps the API OpenAI-compatible while allowing direct provider targeting.

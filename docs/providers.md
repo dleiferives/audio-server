@@ -19,6 +19,8 @@ Providers are registered in `cmd/audio/main.go` and routed by the `model` field 
 **Package:** `internal/provider/espeak`  
 **Requires:** `espeak-ng` binary, `ffmpeg` binary (for MP3 encoding)
 
+See [`tts/espeak-ng/README.md`](../tts/espeak-ng/README.md) for setup notes.
+
 The espeak provider shells out to `espeak-ng --stdin --stdout` to generate WAV, then pipes the result through `ffmpeg` to produce MP3. WAV output is returned directly without encoding.
 
 ### Voice selection
@@ -48,22 +50,38 @@ type Encoder interface {
 
 The shipped implementation is `FFmpeg` (`internal/encode/ffmpeg.go`).
 
-## OmniVoice (Greek)
+## omnivoice
 
-**Status:** standalone script, not yet integrated as a provider  
-**Location:** `tts/el/greek_tts.py`  
-**Requires:** Python 3.10+, CUDA-enabled PyTorch, `omnivoice==0.1.5`
+**ID:** `omnivoice`  
+**Package:** `internal/provider/omnivoice`  
+**Sidecar:** `tts/omnivoice/server.py`  
+**Requires:** Python 3.10+, CUDA-enabled PyTorch, `omnivoice==0.1.5` (sidecar); nothing on the Go side beyond network access to the sidecar
 
-The OmniVoice model (`k2-fsa/OmniVoice`) handles Greek (`el`) synthesis via diffusion. It chunks long input internally and reuses the first generated voice for consistency.
+The OmniVoice model (`k2-fsa/OmniVoice`) handles Greek (`el`) synthesis via diffusion. It chunks long input internally and reuses the first generated voice for consistency. WAV output only (no format conversion).
 
-See [`tts/el/README.md`](../tts/el/README.md) for usage.
+The Go provider is a thin HTTP client: it calls `GET /health`, `GET /voices`, and `POST /synthesize` on the sidecar. Enable it by setting `AUDIO_OMNIVOICE_ADDR` (or `-omnivoice-addr`) to the sidecar's base URL, e.g. `http://127.0.0.1:8020`; the provider is not registered when this is blank, so the main server starts fine without the sidecar running.
 
-The planned integration path is an HTTP sidecar: the Python script exposes a local HTTP endpoint that the Go server calls as a provider backend. See the open GitHub issue.
+Run the sidecar independently:
+
+```bash
+python -m pip install torch==2.8.0+cu128 torchaudio==2.8.0+cu128 \
+  --extra-index-url https://download.pytorch.org/whl/cu128
+python -m pip install omnivoice==0.1.5
+./tts/omnivoice/server.py --port 8020
+```
+
+### Routing
+
+- `"model": "omnivoice"` routes directly to this provider
+- `"language": "el"` with no explicit model also routes here (see `languageProviders` in `internal/server/server.go`)
+
+See [`tts/omnivoice/README.md`](../tts/omnivoice/README.md) for the standalone CLI script (`greek_tts.py`), which the sidecar's model-loading logic is based on.
 
 ## Adding a provider
 
 1. Create a package under `internal/provider/<name>/`
 2. Implement `provider.Provider`
 3. Instantiate in `cmd/audio/main.go` and pass to `server.Config.Providers`
+4. If the provider needs a script, model, or sidecar, put it under `tts/<name>/` (e.g. `tts/omnivoice/`, `tts/espeak-ng/`). Future STT/diarization providers follow the same pattern under `stt/<name>/`.
 
 The server routes requests by provider ID; the default provider handles all OpenAI model aliases.

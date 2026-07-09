@@ -18,6 +18,7 @@ import (
 	"github.com/dleiferives/audio-server/internal/encode"
 	"github.com/dleiferives/audio-server/internal/provider"
 	"github.com/dleiferives/audio-server/internal/provider/espeak"
+	"github.com/dleiferives/audio-server/internal/provider/omnivoice"
 	"github.com/dleiferives/audio-server/internal/server"
 )
 
@@ -32,12 +33,17 @@ func main() {
 	mp3Bitrate := flag.String("mp3-bitrate", env("AUDIO_MP3_BITRATE", "48k"), "mp3 bitrate for generated speech")
 	defaultProvider := flag.String("default-provider", env("AUDIO_DEFAULT_PROVIDER", "espeak-ng"), "default provider id")
 	defaultVoice := flag.String("espeak-default-voice", env("AUDIO_ESPEAK_DEFAULT_VOICE", "en"), "default eSpeak voice")
+	omnivoiceAddr := flag.String("omnivoice-addr", env("AUDIO_OMNIVOICE_ADDR", ""), "OmniVoice sidecar base URL (e.g. http://127.0.0.1:8020); disabled when blank")
 	flag.Parse()
 
 	encoder := encode.NewFFmpeg(*ffmpegPath, *mp3Bitrate)
 	espeakProvider := espeak.New(*espeakPath, *defaultVoice, encoder)
+	providers := []provider.Provider{espeakProvider}
+	if strings.TrimSpace(*omnivoiceAddr) != "" {
+		providers = append(providers, omnivoice.New(*omnivoiceAddr, nil))
+	}
 	audioServer, err := server.New(server.Config{
-		Providers:       []provider.Provider{espeakProvider},
+		Providers:       providers,
 		DefaultProvider: *defaultProvider,
 		APIKey:          *apiKey,
 		MaxInputChars:   *maxInputChars,
