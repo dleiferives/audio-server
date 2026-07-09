@@ -31,9 +31,18 @@ type HTTPClient interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
+// Encoder converts the sidecar's WAV output to another format. The sidecar
+// itself only ever produces WAV; OmniVoice never streams, so it's always
+// safe to buffer the WAV result and encode it after the fact — unlike
+// espeak-ng's Encoder, no streaming variant is needed here.
+type Encoder interface {
+	Encode(ctx context.Context, wav []byte, format string) ([]byte, string, error)
+}
+
 type Provider struct {
 	BaseURL string
 	Client  HTTPClient
+	Encoder Encoder
 }
 
 var (
@@ -41,12 +50,12 @@ var (
 	_ provider.Lifecycle = Provider{}
 )
 
-func New(baseURL string, client HTTPClient) Provider {
+func New(baseURL string, client HTTPClient, enc Encoder) Provider {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return Provider{BaseURL: baseURL, Client: client}
+	return Provider{BaseURL: baseURL, Client: client, Encoder: enc}
 }
 
 func (p Provider) ID() string {
@@ -206,7 +215,7 @@ func (p Provider) Synthesize(ctx context.Context, req provider.SpeechRequest) (p
 	if format == "" {
 		format = "wav"
 	}
-	if format != "wav" {
+	if format != "wav" && p.Encoder == nil {
 		return provider.SpeechResult{}, fmt.Errorf("%w: %s", provider.ErrUnsupportedFormat, format)
 	}
 
@@ -259,13 +268,29 @@ func (p Provider) Synthesize(ctx context.Context, req provider.SpeechRequest) (p
 	if strings.TrimSpace(voice) == "" || voice == "auto" {
 		voice = defaultVoice
 	}
+
+	if format == "wav" {
+		return provider.SpeechResult{
+			Audio:       respBody,
+			ContentType: "audio/wav",
+			ProviderID:  id,
+			Model:       id,
+			Voice:       voice,
+			Format:      "wav",
+		}, nil
+	}
+
+	audio, contentType, err := p.Encoder.Encode(ctx, respBody, format)
+	if err != nil {
+		return provider.SpeechResult{}, err
+	}
 	return provider.SpeechResult{
-		Audio:       respBody,
-		ContentType: "audio/wav",
+		Audio:       audio,
+		ContentType: contentType,
 		ProviderID:  id,
 		Model:       id,
 		Voice:       voice,
-		Format:      "wav",
+		Format:      format,
 	}, nil
 }
 

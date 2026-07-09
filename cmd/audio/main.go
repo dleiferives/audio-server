@@ -45,7 +45,7 @@ func main() {
 	workers := map[string]int{espeakProvider.ID(): *maxConcurrency}
 	idleUnload := map[string]time.Duration{}
 	if strings.TrimSpace(*omnivoiceAddr) != "" {
-		omnivoiceProvider := omnivoice.New(*omnivoiceAddr, nil)
+		omnivoiceProvider := omnivoice.New(*omnivoiceAddr, nil, encoder)
 		providers = append(providers, omnivoiceProvider)
 		workers[omnivoiceProvider.ID()] = *omnivoiceConcurrency
 		idleUnload[omnivoiceProvider.ID()] = time.Duration(*omnivoiceIdleUnloadSeconds) * time.Second

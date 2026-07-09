@@ -85,7 +85,7 @@ The shipped implementation is `FFmpeg` (`internal/encode/ffmpeg.go`).
 **Sidecar:** `tts/omnivoice/server.py`  
 **Requires:** Python 3.10+, CUDA-enabled PyTorch, `omnivoice==0.1.5` (sidecar); nothing on the Go side beyond network access to the sidecar
 
-The OmniVoice model (`k2-fsa/OmniVoice`) handles Greek (`el`) synthesis via diffusion. It chunks long input internally and reuses the first generated voice for consistency. WAV output only (no format conversion).
+The OmniVoice model (`k2-fsa/OmniVoice`) handles Greek (`el`) synthesis via diffusion. It chunks long input internally and reuses the first generated voice for consistency. The sidecar only ever produces WAV; for any other `response_format` (e.g. the default `mp3`), the Go provider encodes the WAV result via the same `encode.FFmpeg` instance espeak-ng uses (`internal/provider/omnivoice.Provider.Encoder`) — this only works for the buffered path since OmniVoice never streams, which is fine since it doesn't implement `provider.Streamer`.
 
 The Go provider is a thin HTTP client: it calls `GET /health`, `GET /voices`, `POST /synthesize`, and (via `provider.Lifecycle`) `POST /load` / `POST /unload` on the sidecar. Enable it by setting `AUDIO_OMNIVOICE_ADDR` (or `-omnivoice-addr`) to the sidecar's base URL, e.g. `http://127.0.0.1:8020`; the provider is not registered when this is blank, so the main server starts fine without the sidecar running.
 

@@ -32,7 +32,7 @@ func TestWarmCallsLoad(t *testing.T) {
 	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
 		gotPath, gotMethod = req.URL.Path, req.Method
 		return jsonResponse(200, `{"status":"ok"}`), nil
-	}})
+	}}, nil)
 	if err := p.Warm(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestIdleCallsUnload(t *testing.T) {
 	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
 		gotPath = req.URL.Path
 		return jsonResponse(200, `{"status":"ok"}`), nil
-	}})
+	}}, nil)
 	if err := p.Idle(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestIdleCallsUnload(t *testing.T) {
 func TestWarmSurfacesSidecarError(t *testing.T) {
 	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
 		return jsonResponse(503, `{"error":"out of memory"}`), nil
-	}})
+	}}, nil)
 	err := p.Warm(context.Background())
 	if !errors.Is(err, provider.ErrUnavailable) || !strings.Contains(err.Error(), "out of memory") {
 		t.Fatalf("unexpected error: %v", err)
@@ -71,7 +71,7 @@ func TestHealthOK(t *testing.T) {
 			t.Fatalf("unexpected path %s", req.URL.Path)
 		}
 		return jsonResponse(200, `{"status":"ok"}`), nil
-	}})
+	}}, nil)
 	if err := p.Health(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestHealthOK(t *testing.T) {
 func TestHealthUnavailable(t *testing.T) {
 	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
 		return nil, errors.New("connection refused")
-	}})
+	}}, nil)
 	if err := p.Health(context.Background()); !errors.Is(err, provider.ErrUnavailable) {
 		t.Fatalf("expected ErrUnavailable, got %v", err)
 	}
@@ -89,7 +89,7 @@ func TestHealthUnavailable(t *testing.T) {
 func TestVoicesFiltersByLanguage(t *testing.T) {
 	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
 		return jsonResponse(200, `{"voices":[{"provider":"omnivoice","voice":"auto","language":"el","name":"OmniVoice automatic"}]}`), nil
-	}})
+	}}, nil)
 	voices, err := p.Voices(context.Background(), "EL")
 	if err != nil {
 		t.Fatal(err)
@@ -122,7 +122,7 @@ func TestSynthesizeSendsRequestAndReturnsWAV(t *testing.T) {
 			Header:     http.Header{"Content-Type": []string{"audio/wav"}},
 			Body:       io.NopCloser(strings.NewReader("RIFF...")),
 		}, nil
-	}})
+	}}, nil)
 
 	result, err := p.Synthesize(context.Background(), provider.SpeechRequest{
 		Input:    "γεια σου",
@@ -151,7 +151,7 @@ func TestSynthesizeAppliesProviderOptions(t *testing.T) {
 			t.Fatal(err)
 		}
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("RIFF..."))}, nil
-	}})
+	}}, nil)
 
 	_, err := p.Synthesize(context.Background(), provider.SpeechRequest{
 		Input:           "hi",
@@ -169,7 +169,7 @@ func TestSynthesizeRejectsUnknownProviderOptionField(t *testing.T) {
 	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
 		t.Fatal("should not call sidecar")
 		return nil, nil
-	}})
+	}}, nil)
 	_, err := p.Synthesize(context.Background(), provider.SpeechRequest{
 		Input:           "hi",
 		ProviderOptions: json.RawMessage(`{"stpes":8}`),
@@ -183,7 +183,7 @@ func TestSynthesizeRejectsInvalidProviderOptionValues(t *testing.T) {
 	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
 		t.Fatal("should not call sidecar")
 		return nil, nil
-	}})
+	}}, nil)
 	_, err := p.Synthesize(context.Background(), provider.SpeechRequest{
 		Input:           "hi",
 		ProviderOptions: json.RawMessage(`{"steps":0}`),
@@ -193,12 +193,55 @@ func TestSynthesizeRejectsInvalidProviderOptionValues(t *testing.T) {
 	}
 }
 
-func TestSynthesizeRejectsNonWAVFormat(t *testing.T) {
+func TestSynthesizeRejectsNonWAVFormatWithoutEncoder(t *testing.T) {
 	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
 		t.Fatal("should not call sidecar")
 		return nil, nil
-	}})
+	}}, nil)
 	_, err := p.Synthesize(context.Background(), provider.SpeechRequest{Input: "hi", ResponseFormat: "mp3"})
+	if !errors.Is(err, provider.ErrUnsupportedFormat) {
+		t.Fatalf("expected ErrUnsupportedFormat, got %v", err)
+	}
+}
+
+type fakeEncoder struct {
+	audio       []byte
+	contentType string
+	err         error
+	gotWAV      []byte
+	gotFormat   string
+}
+
+func (f *fakeEncoder) Encode(_ context.Context, wav []byte, format string) ([]byte, string, error) {
+	f.gotWAV = wav
+	f.gotFormat = format
+	return f.audio, f.contentType, f.err
+}
+
+func TestSynthesizeEncodesNonWAVFormatViaEncoder(t *testing.T) {
+	enc := &fakeEncoder{audio: []byte("mp3-bytes"), contentType: "audio/mpeg"}
+	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("RIFF..."))}, nil
+	}}, enc)
+
+	result, err := p.Synthesize(context.Background(), provider.SpeechRequest{Input: "hi", ResponseFormat: "mp3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result.Audio) != "mp3-bytes" || result.ContentType != "audio/mpeg" || result.Format != "mp3" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if string(enc.gotWAV) != "RIFF..." || enc.gotFormat != "mp3" {
+		t.Fatalf("encoder not called with expected args: wav=%q format=%q", enc.gotWAV, enc.gotFormat)
+	}
+}
+
+func TestSynthesizeSurfacesEncoderError(t *testing.T) {
+	enc := &fakeEncoder{err: provider.ErrUnsupportedFormat}
+	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("RIFF..."))}, nil
+	}}, enc)
+	_, err := p.Synthesize(context.Background(), provider.SpeechRequest{Input: "hi", ResponseFormat: "flac"})
 	if !errors.Is(err, provider.ErrUnsupportedFormat) {
 		t.Fatalf("expected ErrUnsupportedFormat, got %v", err)
 	}
@@ -207,7 +250,7 @@ func TestSynthesizeRejectsNonWAVFormat(t *testing.T) {
 func TestSynthesizeSurfacesSidecarError(t *testing.T) {
 	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
 		return jsonResponse(500, `{"error":"boom"}`), nil
-	}})
+	}}, nil)
 	_, err := p.Synthesize(context.Background(), provider.SpeechRequest{Input: "hi"})
 	if !errors.Is(err, provider.ErrUnavailable) || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("unexpected error: %v", err)
