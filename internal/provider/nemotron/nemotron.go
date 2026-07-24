@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/dleiferives/audio-server/internal/sttprovider"
@@ -77,10 +78,22 @@ func (p Provider) Transcribe(ctx context.Context, req sttprovider.TranscriptionR
 		return sttprovider.TranscriptionResult{}, fmt.Errorf("%w: audio is required", sttprovider.ErrInvalidRequest)
 	}
 
+	// Write audio to temp WAV file (audiocpp_server expects a file path)
+	tmpFile, err := os.CreateTemp("", "nemotron-*.wav")
+	if err != nil {
+		return sttprovider.TranscriptionResult{}, fmt.Errorf("%w: %v", sttprovider.ErrUnavailable, err)
+	}
+	defer os.Remove(tmpFile.Name())
+	if _, err := tmpFile.Write(req.Audio); err != nil {
+		tmpFile.Close()
+		return sttprovider.TranscriptionResult{}, fmt.Errorf("%w: %v", sttprovider.ErrUnavailable, err)
+	}
+	tmpFile.Close()
+
 	body, err := json.Marshal(map[string]any{
-		"model":        req.Model,
-		"language":     req.Language,
-		"audio":        req.Audio,
+		"model":           "nemotron",
+		"audio":           tmpFile.Name(),
+		"language":        req.Language,
 		"response_format": "json",
 	})
 	if err != nil {
