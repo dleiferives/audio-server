@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -44,16 +43,16 @@ func main() {
 	omnivoiceConcurrency := flag.Int("omnivoice-concurrency", envInt("AUDIO_OMNIVOICE_CONCURRENCY", 1), "concurrent OmniVoice workers")
 	kokoroAddr := flag.String("kokoro-addr", env("AUDIO_KOKORO_ADDR", ""), "Kokoro TTS sidecar base URL (e.g. http://127.0.0.1:8021); disabled when blank")
 	kokoroConcurrency := flag.Int("kokoro-concurrency", envInt("AUDIO_KOKORO_CONCURRENCY", 1), "concurrent Kokoro workers")
-	kokoroIdleUnloadSeconds := flag.Int("kokoro-idle-unload-seconds", envInt("AUDIO_KOKORO_IDLE_UNLOAD_SECONDS", 30), "seconds an empty Kokoro queue waits before the model is unloaded")
+	_ = flag.Int("kokoro-idle-unload-seconds", envInt("AUDIO_KOKORO_IDLE_UNLOAD_SECONDS", 30), "seconds an empty Kokoro queue waits before the model is unloaded")
+	_ = flag.Int("model-idle-unload-seconds", envInt("AUDIO_MODEL_IDLE_UNLOAD_SECONDS", 600), "seconds before unloading idle GPU models (default 10 min)")
+	_ = flag.String("audiocpp-bin", env("AUDIO_AUDIOCPP_BIN", "audio.cpp/build/linux-cuda-release/bin/audiocpp_server"), "path to audiocpp_server binary")
+	_ = flag.String("audiocpp-omnivoice-cfg", env("AUDIO_AUDIOCPP_OMNIVOICE_CFG", "audio.cpp/omnivoice-config.json"), "config for OmniVoice instance")
+	_ = flag.String("audiocpp-supertonic-cfg", env("AUDIO_AUDIOCPP_SUPERTONIC_CFG", "audio.cpp/supertonic-config.json"), "config for Supertonic instance")
 	fasterWhisperAddr := flag.String("faster-whisper-addr", env("AUDIO_FASTERWHISPER_ADDR", ""), "faster-whisper sidecar base URL (e.g. http://127.0.0.1:8030); disabled when blank")
 	webDir := flag.String("web-dir", env("AUDIO_WEB_DIR", ""), "optional path to static web frontend directory")
 	audioTTL := flag.Int("audio-ttl-seconds", envInt("AUDIO_AUDIO_TTL_SECONDS", 0), "audio file retention in seconds (0 = forever)")
 	audioStoreDir := flag.String("audio-store-dir", env("AUDIO_STORE_DIR", ""), "directory for generated audio files (empty = in-memory)")
-	supertonicPort := flag.Int("supertonic-port", envInt("AUDIO_SUPERTONIC_PORT", 8022), "audiocpp_server port for Supertonic")
-	idleUnloadSeconds := flag.Int("model-idle-unload-seconds", envInt("AUDIO_MODEL_IDLE_UNLOAD_SECONDS", 600), "seconds before unloading idle GPU models (default 10 min)")
-	audiocppBin := flag.String("audiocpp-bin", env("AUDIO_AUDIOCPP_BIN", "audio.cpp/build/linux-cuda-release/bin/audiocpp_server"), "path to audiocpp_server binary")
-	audiocppCfgOmni := flag.String("audiocpp-omnivoice-cfg", env("AUDIO_AUDIOCPP_OMNIVOICE_CFG", "audio.cpp/omnivoice-config.json"), "config for OmniVoice instance")
-	audiocppCfgSuper := flag.String("audiocpp-supertonic-cfg", env("AUDIO_AUDIOCPP_SUPERTONIC_CFG", "audio.cpp/supertonic-config.json"), "config for Supertonic instance")
+	_ = flag.Int("supertonic-port", envInt("AUDIO_SUPERTONIC_PORT", 8022), "DEPRECATED — shares same audiocpp_server as omnivoice")
 	flag.Parse()
 
 	encoder := encode.NewFFmpeg(*ffmpegPath, *mp3Bitrate)
@@ -64,10 +63,7 @@ func main() {
 	if strings.TrimSpace(*omnivoiceAddr) != "" {
 		providers = append(providers, omnivoice.New(*omnivoiceAddr, nil, encoder))
 		workers["omnivoice"] = *omnivoiceConcurrency
-	}
-	if strings.TrimSpace(*omnivoiceAddr) != "" {
-		superAddr := fmt.Sprintf("http://127.0.0.1:%d", *supertonicPort)
-		providers = append(providers, supertonic.New(superAddr, nil, encoder))
+		providers = append(providers, supertonic.New(*omnivoiceAddr, nil, encoder))
 		workers["supertonic"] = 2
 	}
 	if strings.TrimSpace(*kokoroAddr) != "" {

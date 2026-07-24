@@ -89,7 +89,7 @@ run: build
 	fi; \
 	ARGS=""; \
 	if [ "$(OMNIVOICE)" = "1" ]; then \
-		ARGS="$$ARGS -omnivoice-addr=http://127.0.0.1:$(OMNIVOICE_PORT) -omnivoice-concurrency=1 -omnivoice-idle-unload-seconds=0"; \
+		ARGS="$$ARGS -omnivoice-addr=http://127.0.0.1:$(OMNIVOICE_PORT) -omnivoice-concurrency=1"; \
 	fi; \
 	if [ "$(KOKORO)" = "1" ]; then \
 		ARGS="$$ARGS -kokoro-addr=http://127.0.0.1:$(KOKORO_PORT) -kokoro-concurrency=1 -kokoro-idle-unload-seconds=30"; \
