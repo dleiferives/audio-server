@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"sync"
@@ -79,6 +80,21 @@ func (m *Manager) Start(name string, exclusive bool) error {
 	}
 	inst.cmd = cmd
 	inst.lastUsed = time.Now()
+
+	// Wait for server to become healthy
+	healthURL := fmt.Sprintf("http://127.0.0.1:%d/health", inst.port)
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(healthURL)
+		if err == nil && resp.StatusCode == 200 {
+			resp.Body.Close()
+			break
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 
 	if inst.idleTimeout > 0 {
 		go m.idleWatcher(inst)

@@ -64,7 +64,7 @@ func main() {
 	var gpuLifecycle *lifecycle.Manager
 	if strings.TrimSpace(*audiocppBin) != "" && strings.TrimSpace(*omnivoiceAddr) != "" {
 		gpuLifecycle = lifecycle.NewManager(*audiocppBin)
-		gpuLifecycle.Register("omnivoice", "audio.cpp/omnivoice-config.json", 8020, time.Duration(*audiocppIdle)*time.Second)
+		gpuLifecycle.Register("omnivoice", "audio.cpp/omnivoice-server.json", 8020, time.Duration(*audiocppIdle)*time.Second)
 		gpuLifecycle.Register("supertonic", "audio.cpp/supertonic-config.json", 8022, time.Duration(*audiocppIdle)*time.Second)
 	}
 
