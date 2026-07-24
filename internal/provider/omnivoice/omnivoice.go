@@ -1,5 +1,5 @@
-// Package omnivoice implements provider.Provider by calling the OmniVoice
-// HTTP sidecar (tts/omnivoice/server.py).
+// Package omnivoice implements provider.Provider by calling the
+// audio.cpp native OmniVoice engine via audiocpp_server.
 package omnivoice
 
 import (
@@ -15,26 +15,17 @@ import (
 )
 
 const (
-	id             = "omnivoice"
-	defaultVoice   = "auto"
-	defaultLang    = "el"
-	defaultSteps   = 32
-	defaultSpeed   = 1.0
-	defaultSeed    = 42
-	defaultChunkS  = 12.0
-	defaultChunkTh = 18.0
+	id           = "omnivoice"
+	defaultVoice = "auto"
+	defaultLang  = "auto"
+	defaultSteps = 32
+	defaultSpeed = 1.0
 )
 
-// HTTPClient is satisfied by *http.Client; it allows tests to substitute a
-// fake transport.
 type HTTPClient interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
-// Encoder converts the sidecar's WAV output to another format. The sidecar
-// itself only ever produces WAV; OmniVoice never streams, so it's always
-// safe to buffer the WAV result and encode it after the fact — unlike
-// espeak-ng's Encoder, no streaming variant is needed here.
 type Encoder interface {
 	Encode(ctx context.Context, wav []byte, format string) ([]byte, string, error)
 }
@@ -46,8 +37,8 @@ type Provider struct {
 }
 
 var (
-	_ provider.Provider  = Provider{}
-	_ provider.Lifecycle = Provider{}
+	_ provider.Provider = Provider{}
+	_ provider.Streamer = Provider{}
 )
 
 func New(baseURL string, client HTTPClient, enc Encoder) Provider {
@@ -79,17 +70,11 @@ func (p Provider) Health(ctx context.Context) error {
 }
 
 type voicesResponse struct {
-	Voices []struct {
-		Provider string `json:"provider"`
-		Voice    string `json:"voice"`
-		Language string `json:"language"`
-		Name     string `json:"name"`
-		Gender   string `json:"gender"`
-	} `json:"voices"`
+	Voices []string `json:"voices"`
 }
 
 func (p Provider) Voices(ctx context.Context, language string) ([]provider.Voice, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.BaseURL+"/voices", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.BaseURL+"/v1/audio/voices?model="+id, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
 	}
@@ -109,82 +94,34 @@ func (p Provider) Voices(ctx context.Context, language string) ([]provider.Voice
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return nil, fmt.Errorf("%w: invalid voices response: %v", provider.ErrUnavailable, err)
 	}
-
-	language = normalizeLanguage(language)
 	voices := make([]provider.Voice, 0, len(parsed.Voices))
 	for _, v := range parsed.Voices {
-		if language != "" && normalizeLanguage(v.Language) != language {
-			continue
-		}
 		voices = append(voices, provider.Voice{
 			Provider: id,
-			Voice:    v.Voice,
-			Language: v.Language,
-			Name:     v.Name,
-			Gender:   v.Gender,
+			Voice:    v,
+			Language: "auto",
+			Name:     v,
 		})
 	}
 	return voices, nil
 }
 
-// Warm loads the model into the sidecar, blocking until it's ready.
-// Implements provider.Lifecycle.
-func (p Provider) Warm(ctx context.Context) error {
-	return p.postControl(ctx, "/load")
-}
-
-// Idle releases the sidecar's GPU resources. Implements provider.Lifecycle.
-func (p Provider) Idle(ctx context.Context) error {
-	return p.postControl(ctx, "/unload")
-}
-
-func (p Provider) postControl(ctx context.Context, path string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.BaseURL+path, nil)
-	if err != nil {
-		return fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
-	}
-	resp, err := p.Client.Do(req)
-	if err != nil {
-		return fmt.Errorf("%w: omnivoice sidecar unreachable: %v", provider.ErrUnavailable, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%w: omnivoice %s failed: %s", provider.ErrUnavailable, path, synthesizeErrorDetail(resp.StatusCode, body))
-	}
-	return nil
-}
-
-type synthesizeRequest struct {
-	Text           string  `json:"text"`
-	Language       string  `json:"language,omitempty"`
-	Speed          float64 `json:"speed,omitempty"`
-	Steps          int     `json:"steps,omitempty"`
-	Seed           int     `json:"seed,omitempty"`
-	ChunkSeconds   float64 `json:"chunk_seconds,omitempty"`
-	ChunkThreshold float64 `json:"chunk_threshold,omitempty"`
-}
-
 // Options holds OmniVoice-specific knobs, sent by the caller in
-// SpeechRequest.ProviderOptions, e.g.:
-//
-//	{"steps": 16, "seed": 7, "chunk_seconds": 8, "chunk_threshold": 10}
+// SpeechRequest.ProviderOptions.
 type Options struct {
 	Steps          int     `json:"steps,omitempty"`
-	Seed           int     `json:"seed,omitempty"`
+	Instruct       string  `json:"instruct,omitempty"`
+	GuidanceScale  float64 `json:"guidance_scale,omitempty"`
+	VoiceRef       string  `json:"voice_ref,omitempty"`
+	ReferenceText  string  `json:"reference_text,omitempty"`
 	ChunkSeconds   float64 `json:"chunk_seconds,omitempty"`
 	ChunkThreshold float64 `json:"chunk_threshold,omitempty"`
 }
 
 func parseOptions(raw json.RawMessage) (Options, error) {
 	opts := Options{
-		Steps:          defaultSteps,
-		Seed:           defaultSeed,
-		ChunkSeconds:   defaultChunkS,
-		ChunkThreshold: defaultChunkTh,
+		Steps:         defaultSteps,
+		GuidanceScale: 2.0,
 	}
 	if len(raw) == 0 {
 		return opts, nil
@@ -197,13 +134,19 @@ func parseOptions(raw json.RawMessage) (Options, error) {
 	if opts.Steps < 1 {
 		return Options{}, fmt.Errorf("%w: provider_options.steps must be at least 1", provider.ErrInvalidRequest)
 	}
-	if opts.ChunkSeconds <= 0 {
-		return Options{}, fmt.Errorf("%w: provider_options.chunk_seconds must be greater than 0", provider.ErrInvalidRequest)
-	}
-	if opts.ChunkThreshold <= 0 {
-		return Options{}, fmt.Errorf("%w: provider_options.chunk_threshold must be greater than 0", provider.ErrInvalidRequest)
-	}
 	return opts, nil
+}
+
+// speechRequest matches the OpenAI-compatible JSON body that audiocpp_server expects.
+type speechRequest struct {
+	Model          string         `json:"model"`
+	Input          string         `json:"input"`
+	Voice          string         `json:"voice,omitempty"`
+	Language       string         `json:"language,omitempty"`
+	Speed          float64        `json:"speed,omitempty"`
+	ResponseFormat string         `json:"response_format,omitempty"`
+	StreamFormat   string         `json:"stream_format,omitempty"`
+	Options        map[string]any `json:"options,omitempty"`
 }
 
 type errorResponse struct {
@@ -227,25 +170,47 @@ func (p Provider) Synthesize(ctx context.Context, req provider.SpeechRequest) (p
 	if speed <= 0 {
 		speed = defaultSpeed
 	}
+	voice := req.Voice
+	if strings.TrimSpace(voice) == "" || voice == "auto" {
+		voice = defaultVoice
+	}
 	opts, err := parseOptions(req.ProviderOptions)
 	if err != nil {
 		return provider.SpeechResult{}, err
 	}
 
-	body, err := json.Marshal(synthesizeRequest{
-		Text:           req.Input,
-		Language:       language,
-		Speed:          speed,
-		Steps:          opts.Steps,
-		Seed:           opts.Seed,
-		ChunkSeconds:   opts.ChunkSeconds,
-		ChunkThreshold: opts.ChunkThreshold,
-	})
+	options := map[string]any{}
+	if opts.Steps > 0 {
+		options["num_inference_steps"] = opts.Steps
+	}
+	if opts.GuidanceScale > 0 {
+		options["guidance_scale"] = opts.GuidanceScale
+	}
+	if opts.Instruct != "" {
+		options["instruct"] = opts.Instruct
+	}
+	if opts.VoiceRef != "" {
+		options["voice_ref"] = opts.VoiceRef
+	}
+	if opts.ReferenceText != "" {
+		options["reference_text"] = opts.ReferenceText
+	}
+
+	sr := speechRequest{
+		Model:    id,
+		Input:    req.Input,
+		Voice:    voice,
+		Language: language,
+		Speed:    speed,
+		Options:  options,
+	}
+
+	body, err := json.Marshal(sr)
 	if err != nil {
 		return provider.SpeechResult{}, fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.BaseURL+"/synthesize", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.BaseURL+"/v1/audio/speech", bytes.NewReader(body))
 	if err != nil {
 		return provider.SpeechResult{}, fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
 	}
@@ -262,11 +227,6 @@ func (p Provider) Synthesize(ctx context.Context, req provider.SpeechRequest) (p
 	}
 	if resp.StatusCode != http.StatusOK {
 		return provider.SpeechResult{}, fmt.Errorf("%w: omnivoice synthesis failed: %s", provider.ErrUnavailable, synthesizeErrorDetail(resp.StatusCode, respBody))
-	}
-
-	voice := req.Voice
-	if strings.TrimSpace(voice) == "" || voice == "auto" {
-		voice = defaultVoice
 	}
 
 	if format == "wav" {
@@ -305,4 +265,106 @@ func synthesizeErrorDetail(status int, body []byte) string {
 func normalizeLanguage(language string) string {
 	language = strings.ToLower(strings.TrimSpace(language))
 	return strings.ReplaceAll(language, "_", "-")
+}
+
+// SynthesizeStream implements provider.Streamer using audiocpp_server's
+// SSE streaming endpoint. It requests chunked audio via text-chunking,
+// writes each decoded PCM chunk to w as it arrives, and calls onHeader
+// once before any bytes are written.
+func (p Provider) SynthesizeStream(ctx context.Context, req provider.SpeechRequest, onHeader func(provider.StreamMeta), w io.Writer) error {
+	language := normalizeLanguage(req.Language)
+	if language == "" {
+		language = defaultLang
+	}
+	speed := req.Speed
+	if speed <= 0 {
+		speed = defaultSpeed
+	}
+	voice := req.Voice
+	if strings.TrimSpace(voice) == "" || voice == "auto" {
+		voice = defaultVoice
+	}
+	opts, err := parseOptions(req.ProviderOptions)
+	if err != nil {
+		return err
+	}
+
+	options := map[string]any{
+		"text_chunk_size": 200,
+		"text_chunk_mode": "tag_aware",
+	}
+	if opts.Steps > 0 {
+		options["num_inference_steps"] = opts.Steps
+	}
+	if opts.GuidanceScale > 0 {
+		options["guidance_scale"] = opts.GuidanceScale
+	}
+	if opts.Instruct != "" {
+		options["instruct"] = opts.Instruct
+	}
+
+	sr := speechRequest{
+		Model:          id,
+		Input:          req.Input,
+		Voice:          voice,
+		Language:       language,
+		Speed:          speed,
+		ResponseFormat: "pcm",
+		StreamFormat:   "sse",
+		Options:        options,
+	}
+
+	body, err := json.Marshal(sr)
+	if err != nil {
+		return fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.BaseURL+"/v1/audio/speech", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+
+	resp, err := p.Client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("%w: omnivoice stream unreachable: %v", provider.ErrUnavailable, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("%w: omnivoice stream failed: %s", provider.ErrUnavailable, synthesizeErrorDetail(resp.StatusCode, respBody))
+	}
+
+	headerSent := false
+	err = readSSEEvents(resp.Body, func(event SSEEvent) error {
+		if !headerSent {
+			onHeader(provider.StreamMeta{
+				ProviderID:  id,
+				Model:       id,
+				Voice:       voice,
+				Format:      "pcm",
+				ContentType: "audio/pcm",
+			})
+			headerSent = true
+		}
+		switch event.Type {
+		case "speech.audio.delta":
+			chunk, err := DecodeBase64Chunk(event.Base64)
+			if err != nil {
+				return nil
+			}
+			if _, err := w.Write(chunk); err != nil {
+				return fmt.Errorf("%w: omnivoice stream write: %v", provider.ErrUnavailable, err)
+			}
+		case "done", "speech.audio.done":
+			return io.EOF
+		}
+		return nil
+	})
+	if err != nil && err != io.EOF && !headerSent {
+		return fmt.Errorf("%w: omnivoice stream read: %v", provider.ErrUnavailable, err)
+	}
+	return nil
 }

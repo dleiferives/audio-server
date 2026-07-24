@@ -1,0 +1,28 @@
+- Uses pyenv for Python version and virtual environment management. Confidence: 0.85
+- Prefers project-specific, freshly-created pyenv environments rather than repurposing existing ones. Confidence: 0.8
+- Values disk space; proactively removes unused development environments to reclaim storage. Confidence: 0.7
+- Prefers Python installations that include sqlite3 support, using it as a deciding factor when choosing between Python versions. Confidence: 0.6
+- Prefers `ffplay` for command-line audio playback — it handles multiple formats (including MP3) directly, avoiding the conversion step that `aplay` would require. Confidence: 0.7
+- Expects dev tooling and launchers to provide full lifecycle management (start, stop, clean), not just a start command. Confidence: 0.7
+- Prefers launcher scripts to automatically free ports and kill stale processes from previous runs before starting, rather than requiring manual `fuser -k` intervention. Confidence: 0.85
+- Prefers small, self-contained frontends using vanilla HTML/CSS/JS with no build steps or framework dependencies. Confidence: 0.8
+- Organizes frontend code in a `web/` directory at the project root. Confidence: 0.85
+- Prefers frontends that dynamically discover backend capabilities by negotiating with the server API, rather than hardcoding what features are available. Confidence: 0.8
+- Expects provider/model-specific capabilities to be fully exposed in the UI when that provider is selected — not a curated subset. When a model supports extra knobs (voice style, instruct, etc.) or a broad language set (e.g., 31 languages), they should all appear as visible controls/options. Confidence: 0.85
+- Prefers optional parameters with server-side auto-detection to default to an "Auto" (empty) choice in the UI, letting the server decide rather than forcing a fixed default value. Confidence: 0.7
+- Uses git submodules for incorporating third-party C/C++ source dependencies into a project. Confidence: 0.7
+- Prefers thorough capability research — feature matrices, API surface analysis, and side-by-side comparisons — before committing to a new dependency or integration path. Wants to know the full config/feature surface before making integration decisions. Confidence: 0.7
+- Wants empirical performance benchmarks (wall-clock timing, side-by-side comparisons) when replacing one implementation or backend with another, rather than relying on assumptions about which is faster. Confidence: 0.65
+- Prefers generous timeouts (or no timeout) for long-running inference/ML operations, rather than aggressive defaults that cut off legitimate work. Confidence: 0.9
+- Wants real-time progress visibility — ETA, progress bar, or chunked streaming output — for long-running inference operations rather than a black-box wait. Confidence: 0.8
+- Prefers streaming output for progress feedback but also wants the final complete result delivered as a composed file — streaming should augment, not replace, getting the full assembled output. Confidence: 0.8
+- Prefers a job-based async pattern for very long-running operations (hours-scale inference): submit work, receive a job ID, and poll or check for completion — rather than holding an open HTTP connection for the entire duration. Confidence: 0.7
+- Prefers job IDs as the central architectural primitive — every operation (streaming or non-streaming) should produce a job ID that can be used to poll status, download results, or re-stream completed work. Confidence: 0.8
+- Prefers operational parameters like audio file retention TTL to be configurable in config.yml rather than hardcoded, with sensible defaults (e.g., 1 hour) and the ability to set custom durations including "forever." Confidence: 0.8
+- Prefers completed/generated outputs to be stored and re-accessible — finished work should be replayable or downloadable on demand, not ephemeral. Confidence: 0.75
+- Prefers config-driven launchers with toggle variables for multi-provider/multi-service projects — declare what's enabled at the top of one file, then a single command builds and launches everything. Confidence: 0.8
+- Evaluates quality vs. performance trade-offs before adopting optimizations — wants to understand what is being sacrificed (if anything) for speed, not blindly accepting the faster option. Confidence: 0.7
+- Prefers replacing interpreted/Python backends with native C/C++ implementations when benchmarks demonstrate meaningful speedup and the native alternative provides equivalent-or-better capabilities. Confidence: 0.75
+- Prefers Makefiles as the coordination/orchestration tool for multi-process projects (building, launching sidecars, starting servers, health-check polling, graceful shutdown). Confidence: 0.7
+- Prefers downloading pre-packaged model artifacts from the ecosystem's standard distribution channel (e.g., audio.cpp-gguf on HuggingFace) over downloading raw model files and performing manual format conversion (e.g., ONNX → safetensors). Confidence: 0.75
+- Prefers lazy-loading ML models on demand with an idle timeout for automatic unloading (~2 minutes) in multi-model serving architectures — rather than keeping all models loaded in GPU memory simultaneously. Combine with a per-model job queue so requests for a cold model block until it warms up. Confidence: 0.8

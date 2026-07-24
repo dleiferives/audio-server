@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Audio Server</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #0f0f0f; color: #e0e0e0;
+  max-width: 640px; margin: 0 auto; padding: 24px 16px;
+}
+h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 20px; }
+.status { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
+.badge {
+  font-size: 0.75rem; padding: 3px 10px; border-radius: 12px;
+  background: #1a1a1a; border: 1px solid #333;
+}
+.badge.ok { border-color: #2e7d32; color: #66bb6a; }
+.badge.down { border-color: #c62828; color: #ef5350; }
+section {
+  background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px;
+  padding: 16px; margin-bottom: 16px;
+}
+section h2 { font-size: 0.9rem; font-weight: 600; margin-bottom: 12px; color: #aaa; }
+label { display: block; font-size: 0.8rem; color: #888; margin-bottom: 4px; }
+input, select, textarea {
+  width: 100%; padding: 8px 10px; border: 1px solid #333; border-radius: 6px;
+  background: #111; color: #e0e0e0; font-size: 0.85rem; margin-bottom: 10px;
+}
+textarea { resize: vertical; min-height: 60px; }
+.row { display: flex; gap: 10px; }
+.row > * { flex: 1; }
+button {
+  padding: 8px 18px; border: none; border-radius: 6px;
+  font-size: 0.85rem; font-weight: 500; cursor: pointer;
+  background: #1e88e5; color: #fff; transition: background 0.15s;
+}
+button:hover { background: #1976d2; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+button.secondary { background: #333; }
+button.secondary:hover { background: #444; }
+button.recording { background: #c62828; animation: pulse 1.2s infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+audio { width: 100%; margin-top: 10px; }
+.output { margin-top: 10px; }
+.output pre {
+  background: #111; border: 1px solid #2a2a2a; border-radius: 6px;
+  padding: 10px; font-size: 0.8rem; overflow-x: auto; max-height: 200px;
+}
+.spinner {
+  display: inline-block; width: 14px; height: 14px; border: 2px solid #333;
+  border-top: 2px solid #1e88e5; border-radius: 50%; animation: spin 0.6s linear infinite;
+  vertical-align: middle; margin-right: 6px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.instruct-group { margin-bottom: 10px; }
+.instruct-group .group-label { font-size: 0.75rem; color: #666; margin-bottom: 4px; }
+.instruct-items { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.instruct-items label { display: inline-flex; align-items: center; gap: 4px; font-size: 0.78rem; color: #bbb; cursor: pointer; margin-bottom: 0; }
+.instruct-items input[type=checkbox] { width: auto; margin-bottom: 0; accent-color: #1e88e5; }
+</style>
+</head>
+<body>
+
+<h1>🎙️ Audio Server</h1>
+
+<div class="status" id="status"></div>
+
+<section>
+  <h2>Text-to-Speech</h2>
+  <label>Text</label>
+  <textarea id="tts-input" placeholder="Type something..."></textarea>
+  <div class="row">
+    <div>
+      <label>Provider</label>
+      <select id="tts-provider"></select>
+    </div>
+    <div>
+      <label>Voice</label>
+      <select id="tts-voice"></select>
+    </div>
+  </div>
+  <div class="row">
+    <div>
+      <label>Language</label>
+      <select id="tts-language">
+        <option value="">Auto</option>
+      </select>
+    </div>
+    <div>
+      <label>Speed</label>
+      <input id="tts-speed" type="number" min="0.25" max="4" step="0.1" value="1">
+    </div>
+  </div>
+  <div class="row">
+    <div>
+      <label>Format</label>
+      <select id="tts-format">
+        <option value="mp3">MP3</option>
+        <option value="wav">WAV</option>
+        <option value="ogg">OGG</option>
+        <option value="opus">Opus</option>
+        <option value="flac">FLAC</option>
+        <option value="pcm">PCM (streaming)</option>
+      </select>
+    </div>
+  </div>
+  <div id="tts-provider-opts" hidden></div>
+  <button id="tts-speak">Speak</button>
+  <div class="output" id="tts-output"></div>
+</section>
+
+<section>
+  <h2>Speech-to-Text</h2>
+  <div class="row">
+    <button id="stt-record" class="secondary">🎤 Record</button>
+    <button id="stt-upload-trigger" class="secondary">📁 Upload file</button>
+  </div>
+  <input type="file" id="stt-file" accept="audio/*" hidden>
+  <div style="margin-top: 10px; font-size: 0.8rem; color: #888;" id="stt-status">Ready</div>
+  <div class="output" id="stt-output"></div>
+</section>
+
+<script>
+const API = '';
+
+async function init() {
+  const [health, voices] = await Promise.all([
+    fetch(API + '/healthz').then(r => r.json()).catch(() => null),
+    fetch(API + '/v1/audio/voices').then(r => r.json()).catch(() => null),
+  ]);
+
+  renderStatus(health);
+  renderProviders(health, voices);
+  renderVoices();
+  renderLanguages();
+
+  ttsProviderEl.onchange = () => { renderVoices(); renderProviderOpts(); };
+  document.getElementById('tts-speak').onclick = doTts;
+  document.getElementById('stt-record').onclick = toggleRecord;
+  document.getElementById('stt-upload-trigger').onclick = () => sttFileEl.click();
+  sttFileEl.onchange = doSttUpload;
+}
+
+function renderStatus(health) {
+  const el = document.getElementById('status');
+  if (!health) {
+    el.innerHTML = '<span class="badge down">Server unreachable</span>';
+    return;
+  }
+  const providers = health.providers || {};
+  el.innerHTML = Object.entries(providers).map(([name, state]) =>
+    `<span class="badge ${state === 'ok' ? 'ok' : 'down'}">${name}: ${state}</span>`
+  ).join('');
+}
+
+function renderProviders(health, voicesData) {
+  const sel = document.getElementById('tts-provider');
+  sel.innerHTML = '';
+  const providers = health?.providers || {};
+  for (const [id, state] of Object.entries(providers)) {
+    // Skip STT providers
+    if (id === 'faster-whisper') continue;
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = id + (state === 'ok' ? '' : ' (down)');
+    sel.appendChild(opt);
+  }
+}
+
+async function renderVoices() {
+  const provider = ttsProviderEl.value;
+  const sel = document.getElementById('tts-voice');
+  sel.innerHTML = '';
+  try {
+    const r = await fetch(API + '/v1/audio/voices?provider=' + encodeURIComponent(provider));
+    const data = await r.json();
+    for (const v of (data.voices || [])) {
+      const opt = document.createElement('option');
+      opt.value = v.voice;
+      opt.textContent = `${v.name} (${v.language})`;
+      sel.appendChild(opt);
+    }
+  } catch (e) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '(none)';
+    sel.appendChild(opt);
+  }
+}
+
+function renderLanguages() {
+  const sel = document.getElementById('tts-language');
+  for (const lang of LANGUAGES) {
+    const opt = document.createElement('option');
+    opt.value = lang;
+    opt.textContent = lang;
+    sel.appendChild(opt);
+  }
+}
+
+async function doTts() {
+  const input = ttsInputEl.value.trim();
+  if (!input) return;
+  const btn = document.getElementById('tts-speak');
+  btn.disabled = true;
+  btn.textContent = 'Submitting...';
+
+  const provider = ttsProviderEl.value;
+  const format = ttsFormatEl.value;
+  const isPcm = format === 'pcm';
+  const req = {
+    model: provider,
+    input,
+    language: ttsLanguageEl.value || undefined,
+    voice: ttsVoiceEl.value,
+    response_format: format,
+    speed: parseFloat(ttsSpeedEl.value) || 1,
+    stream: isPcm,
+  };
+  const opts = getProviderOptions();
+  if (opts) req.provider_options = opts;
+
+  try {
+    const r = await fetch(API + '/v1/audio/speech', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({ error: r.statusText }));
+      throw new Error(err.error);
+    }
+
+    const jobID = r.headers.get('X-Job-ID');
+    const reader = r.body.getReader();
+    const chunks = [];
+    let totalBytes = 0;
+
+    // Start polling progress
+    let progressTimer = null;
+    if (jobID) {
+      progressTimer = setInterval(async () => {
+        try {
+          const sr = await fetch(API + '/v1/audio/jobs/' + jobID);
+          const sj = await sr.json();
+          const c = sj.stream_chunks || 0;
+          btn.textContent = `Generating... (${c} chunks)`;
+          if (sj.status === 'failed') {
+            throw new Error(sj.error || 'job failed');
+          }
+        } catch (e) { /* poll silently */ }
+      }, 1000);
+    }
+
+    // Read stream — progressive playback for PCM, accumulate for everything else
+    if (isPcm) {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      const actx = new AudioContext({ sampleRate: 24000 });
+      let scheduledUntil = 0;
+      const allChunks = [];
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        allChunks.push(value);
+
+        // Schedule this PCM chunk for immediate playback
+        const buf = new Int16Array(value.buffer);
+        const float32 = new Float32Array(buf.length);
+        for (let i = 0; i < buf.length; i++) float32[i] = buf[i] / 32768;
+
+        const audioBuf = actx.createBuffer(1, float32.length, 24000);
+        audioBuf.getChannelData(0).set(float32);
+        const source = actx.createBufferSource();
+        source.buffer = audioBuf;
+        source.connect(actx.destination);
+        const now = actx.currentTime;
+        const startAt = Math.max(now, scheduledUntil);
+        source.start(startAt);
+        scheduledUntil = startAt + audioBuf.duration;
+
+        btn.textContent = `Playing... (${(scheduledUntil - now).toFixed(0)}s buffered)`;
+      }
+      if (progressTimer) clearInterval(progressTimer);
+
+      const finalWav = pcmToWav(flattenChunks(allChunks), 24000);
+      renderAudio(finalWav, provider);
+      btn.textContent = 'Speak';
+    } else {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+      }
+      if (progressTimer) clearInterval(progressTimer);
+      const blob = new Blob(chunks, { type: r.headers.get('Content-Type') || 'audio/mpeg' });
+      renderAudio(blob, provider);
+      btn.textContent = 'Speak';
+    }
+  } catch (e) {
+    ttsOutputEl.innerHTML = `<pre>Error: ${e.message}</pre>`;
+    btn.textContent = 'Speak';
+  }
+  btn.disabled = false;
+}
+
+function flattenChunks(chunks) {
+  const total = chunks.reduce((s, c) => s + c.length, 0);
+  const buf = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) { buf.set(c, off); off += c.length; }
+  return buf.buffer;
+}
+
+function pcmToWav(pcmBuffer, sampleRate) {
+  const numChannels = 1;
+  const bitsPerSample = 16;
+  const byteRate = sampleRate * numChannels * bitsPerSample / 8;
+  const blockAlign = numChannels * bitsPerSample / 8;
+  const dataSize = pcmBuffer.byteLength;
+  const headerSize = 44;
+  const buffer = new ArrayBuffer(headerSize + dataSize);
+  const view = new DataView(buffer);
+
+  function writeString(off, str) { for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i)); }
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+  writeString(36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  const pcmView = new Uint8Array(pcmBuffer);
+  new Uint8Array(buffer, headerSize, dataSize).set(pcmView);
+  return buffer;
+}
+
+function renderAudio(wavBuffer, label) {
+  const blob = new Blob([wavBuffer], { type: 'audio/wav' });
+  const url = URL.createObjectURL(blob);
+  ttsOutputEl.innerHTML = '';
+  const audio = document.createElement('audio');
+  audio.controls = true;
+  audio.src = url;
+  const download = document.createElement('a');
+  download.href = url;
+  download.download = `${label}-${Date.now()}.wav`;
+  download.textContent = '⬇ Download';
+  download.style.cssText = 'display:block;font-size:0.8rem;color:#1e88e5;margin-top:4px;text-decoration:none;';
+  ttsOutputEl.appendChild(audio);
+  ttsOutputEl.appendChild(download);
+}
+
+let mediaRecorder, audioChunks;
+const sttStatusEl = document.getElementById('stt-status');
+const sttOutputEl = document.getElementById('stt-output');
+
+async function toggleRecord() {
+  const btn = document.getElementById('stt-record');
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop();
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(stream);
+    audioChunks = [];
+    mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+    mediaRecorder.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      const blob = new Blob(audioChunks, { type: 'audio/webm' });
+      doStt(blob, 'recording.webm');
+    };
+    mediaRecorder.start();
+    btn.classList.add('recording');
+    btn.textContent = '⏹ Stop';
+    sttStatusEl.textContent = 'Recording...';
+  } catch (e) {
+    sttStatusEl.textContent = 'Mic access denied';
+  }
+}
+
+function doSttUpload() {
+  const file = sttFileEl.files[0];
+  if (!file) return;
+  sttStatusEl.textContent = `Transcribing ${file.name}...`;
+  doStt(file, file.name);
+}
+
+async function doStt(blob, filename) {
+  const btn = document.getElementById('stt-record');
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.classList.remove('recording');
+  sttStatusEl.textContent = 'Transcribing...';
+
+  const fd = new FormData();
+  fd.append('file', blob, filename);
+  fd.append('response_format', 'json');
+
+  try {
+    const r = await fetch(API + '/v1/audio/transcriptions', {
+      method: 'POST', body: fd,
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({ error: r.statusText }));
+      throw new Error(err.error);
+    }
+    const data = await r.json();
+    sttOutputEl.innerHTML = `<pre>${data.text}</pre>`;
+    sttStatusEl.textContent = 'Done';
+  } catch (e) {
+    sttOutputEl.innerHTML = `<pre>Error: ${e.message}</pre>`;
+    sttStatusEl.textContent = 'Failed';
+  }
+  btn.disabled = false;
+  btn.textContent = '🎤 Record';
+  sttFileEl.value = '';
+}
+
+const PROVIDER_OPTS = {
+  'omnivoice': [
+    { key: 'instruct', label: 'Voice style', type: 'instruct', default: '', help: 'Select voice attributes to describe the desired style' },
+    { key: 'guidance_scale', label: 'Guidance scale', type: 'number', min: 0.1, step: 0.1, default: 2.0, help: 'Classifier-free guidance strength (higher = more strongly follows instruct)' },
+    { key: 'steps', label: 'Steps', type: 'number', min: 1, default: 32, help: 'Diffusion steps (fewer = faster, lower quality)' },
+  ],
+  'supertonic': [
+    { key: 'steps', label: 'Steps', type: 'number', min: 5, max: 12, default: 8, help: 'Quality level (5 = fast, 12 = best quality)' },
+  ],
+};
+
+const INSTRUCT_ITEMS = [
+  { group: 'Pitch', items: ['very high pitch', 'high pitch', 'moderate pitch', 'low pitch', 'very low pitch'] },
+  { group: 'Age/Gender', items: ['child', 'teenager', 'young adult', 'middle-aged', 'elderly', 'male', 'female'] },
+  { group: 'Accent', items: ['american accent', 'british accent', 'australian accent', 'canadian accent', 'chinese accent', 'indian accent', 'japanese accent', 'korean accent', 'portuguese accent', 'russian accent'] },
+  { group: 'Tone', items: ['whisper'] },
+];
+
+const LANGUAGES = [
+  'en', 'ar', 'bg', 'cs', 'da', 'de', 'el', 'es', 'et', 'fi',
+  'fr', 'hi', 'hr', 'hu', 'id', 'it', 'ja', 'ko', 'lt', 'lv',
+  'nl', 'pl', 'pt', 'ro', 'ru', 'sk', 'sl', 'sv', 'tr', 'uk',
+  'vi', 'na',
+];
+
+function renderProviderOpts() {
+  const container = document.getElementById('tts-provider-opts');
+  const provider = ttsProviderEl.value;
+  const opts = PROVIDER_OPTS[provider];
+  if (!opts || !opts.length) { container.hidden = true; return; }
+  container.hidden = false;
+
+  let html = '';
+  let row = '';
+  let count = 0;
+  for (const o of opts) {
+    if (o.type === 'instruct') {
+      html += '<div class="instruct-group">';
+      for (const g of INSTRUCT_ITEMS) {
+        html += `<div class="group-label">${g.group}</div><div class="instruct-items">`;
+        for (const item of g.items) {
+          html += `<label><input type="checkbox" class="tpo-instruct" value="${item}">${item}</label>`;
+        }
+        html += '</div>';
+      }
+      html += '</div>';
+    } else {
+      const step = o.step || 1;
+      row += `<div><label title="${o.help}">${o.label}</label>
+        <input id="tpo-${o.key}" type="${o.type}" min="${o.min || ''}" max="${o.max || ''}" step="${step}" value="${o.default}"></div>`;
+      count++;
+      if (count % 2 === 0) { html += '<div class="row">' + row + '</div>'; row = ''; }
+    }
+  }
+  if (row) html += '<div class="row">' + row + '<div></div></div>';
+  container.innerHTML = html;
+}
+
+function getProviderOptions() {
+  const provider = ttsProviderEl.value;
+  const opts = PROVIDER_OPTS[provider];
+  if (!opts) return undefined;
+  const result = {};
+  for (const o of opts) {
+    if (o.type === 'instruct') {
+      const checked = document.querySelectorAll('.tpo-instruct:checked');
+      if (checked.length > 0) {
+        result.instruct = Array.from(checked).map(c => c.value).join(', ');
+      }
+    } else {
+      const el = document.getElementById('tpo-' + o.key);
+      if (!el) continue;
+      const v = el.value.trim();
+      if (v === '' || v === String(o.default)) continue;
+      result[o.key] = o.type === 'number' ? parseFloat(v) : v;
+    }
+  }
+  return Object.keys(result).length ? result : undefined;
+}
+
+const ttsInputEl = document.getElementById('tts-input');
+const ttsProviderEl = document.getElementById('tts-provider');
+const ttsVoiceEl = document.getElementById('tts-voice');
+const ttsLanguageEl = document.getElementById('tts-language');
+const ttsFormatEl = document.getElementById('tts-format');
+const ttsSpeedEl = document.getElementById('tts-speed');
+const ttsOutputEl = document.getElementById('tts-output');
+const sttFileEl = document.getElementById('stt-file');
+
+init();
+</script>
+</body>
+</html>

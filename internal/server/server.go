@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/dleiferives/audio-server/internal/provider"
 	"github.com/dleiferives/audio-server/internal/queue"
+	"github.com/dleiferives/audio-server/internal/store"
 	"github.com/dleiferives/audio-server/internal/sttprovider"
 )
 
@@ -43,6 +45,15 @@ type Config struct {
 	SttProviders       []sttprovider.Provider
 	DefaultSttProvider string
 	MaxUploadBytes     int
+
+	// WebDir is an optional path to a directory of static files to serve at
+	// the root. When set, GET requests not matching any API route are served
+	// from this directory (e.g. an index.html frontend).
+	WebDir string
+
+	// AudioStore persists generated audio to disk when set.
+	// Nil means audio is held in memory only.
+	AudioStore *store.Store
 }
 
 type Server struct {
@@ -57,6 +68,8 @@ type Server struct {
 	sttProviders       map[string]sttprovider.Provider
 	defaultSttProvider string
 	maxUploadBytes     int
+	webDir             string
+	audioStore         *store.Store
 }
 
 func New(cfg Config) (*Server, error) {
@@ -86,9 +99,6 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.MaxInputChars <= 0 {
 		cfg.MaxInputChars = defaultMaxInputChars
-	}
-	if cfg.RequestTimeout <= 0 {
-		cfg.RequestTimeout = defaultRequestTimeout
 	}
 	if cfg.MaxUploadBytes <= 0 {
 		cfg.MaxUploadBytes = defaultMaxUploadBytes
@@ -134,6 +144,8 @@ func New(cfg Config) (*Server, error) {
 		sttProviders:       sttProviders,
 		defaultSttProvider: cfg.DefaultSttProvider,
 		maxUploadBytes:     cfg.MaxUploadBytes,
+		webDir:             cfg.WebDir,
+		audioStore:         cfg.AudioStore,
 	}, nil
 }
 
@@ -145,7 +157,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/audio/jobs", s.auth(s.createJob))
 	mux.HandleFunc("GET /v1/audio/jobs/{id}", s.auth(s.getJob))
 	mux.HandleFunc("GET /v1/audio/jobs/{id}/audio", s.auth(s.getJobAudio))
+	mux.HandleFunc("GET /v1/audio/jobs/{id}/stream", s.auth(s.getJobStream))
 	mux.HandleFunc("POST /v1/audio/transcriptions", s.auth(s.transcriptions))
+	if s.webDir != "" {
+		fs := http.FileServer(http.Dir(s.webDir))
+		mux.Handle("GET /", fs)
+	}
 	return mux
 }
 
@@ -212,8 +229,12 @@ func (s *Server) speech(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), s.requestTimeout)
-	defer cancel()
+	ctx := r.Context()
+	if s.requestTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.requestTimeout)
+		defer cancel()
+	}
 	finished, err := s.queue.Wait(ctx, job.ID)
 	if err != nil {
 		writeProviderError(w, err)
@@ -234,8 +255,12 @@ func (s *Server) speech(w http.ResponseWriter, r *http.Request) {
 // entirely, gated instead by a small per-provider semaphore sized from
 // Config.StreamWorkers.
 func (s *Server) streamSpeech(w http.ResponseWriter, r *http.Request, req provider.SpeechRequest, providerID string, streamer provider.Streamer) {
-	ctx, cancel := context.WithTimeout(r.Context(), s.requestTimeout)
-	defer cancel()
+	ctx := r.Context()
+	if s.requestTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.requestTimeout)
+		defer cancel()
+	}
 
 	sem := s.streamSem[providerID]
 	select {
@@ -246,7 +271,14 @@ func (s *Server) streamSpeech(w http.ResponseWriter, r *http.Request, req provid
 		return
 	}
 
+	job := s.queue.NewRunningJob(providerID, req)
+	w.Header().Set("X-Job-ID", job.ID)
+
 	fw := &flushWriter{w: w}
+	var buf bytes.Buffer
+	mw := io.MultiWriter(fw, &buf)
+
+	chunkW := &chunkCounter{w: mw, jobID: job.ID, queue: s.queue}
 	err := streamer.SynthesizeStream(ctx, req, func(meta provider.StreamMeta) {
 		w.Header().Set("Content-Type", meta.ContentType)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -254,15 +286,89 @@ func (s *Server) streamSpeech(w http.ResponseWriter, r *http.Request, req provid
 		w.Header().Set("X-TTS-Model", meta.Model)
 		w.Header().Set("X-TTS-Voice", meta.Voice)
 		w.Header().Set("X-TTS-Format", meta.Format)
+		w.Header().Set("X-Job-ID", job.ID)
+		w.Header().Set("Transfer-Encoding", "chunked")
 		w.WriteHeader(http.StatusOK)
-	}, fw)
-	if err != nil && !fw.headerWritten {
-		// Nothing sent yet — still safe to write a normal error response.
-		writeProviderError(w, err)
+	}, chunkW)
+	if err != nil {
+		if !fw.headerWritten {
+			s.queue.FailJob(job.ID, err)
+			writeProviderError(w, err)
+		} else {
+			s.queue.FailJob(job.ID, err)
+		}
+		return
 	}
-	// If headers/bytes were already flushed, there's nothing left to do on
-	// error: the client already has a 200 with a truncated body. Chunked
-	// transfer encoding surfaces this as a short read on the client side.
+	fw.Flush()
+	if s.audioStore != nil {
+		s.audioStore.Write(job.ID, buf.Bytes())
+	}
+	s.queue.CompleteJob(job.ID, provider.SpeechResult{
+		Audio:       buf.Bytes(),
+		ContentType: "audio/pcm",
+		ProviderID:  providerID,
+		Model:       providerID,
+		Voice:       req.Voice,
+		Format:      "pcm",
+	})
+}
+
+// getJobStream streams live audio for a running job or replays from disk
+// for a completed job.
+func (s *Server) getJobStream(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	job, ok := s.queue.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, errors.New("unknown job id"))
+		return
+	}
+
+	switch job.Status {
+	case queue.StatusRunning:
+		if job.StreamBus == nil {
+			writeError(w, http.StatusConflict, errors.New("job is not streaming"))
+			return
+		}
+		w.Header().Set("Content-Type", "audio/pcm")
+		w.Header().Set("Transfer-Encoding", "chunked")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		for chunk := range job.StreamBus {
+			w.Write(chunk)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	case queue.StatusSucceeded:
+		var audio []byte
+		if s.audioStore != nil {
+			var err error
+			audio, err = s.audioStore.Read(id)
+			if err != nil {
+				writeError(w, http.StatusNotFound, errors.New("audio file not found"))
+				return
+			}
+		} else {
+			audio = job.Result.Audio
+		}
+		w.Header().Set("Content-Type", "audio/pcm")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(audio)))
+		w.WriteHeader(http.StatusOK)
+		w.Write(audio)
+	default:
+		writeError(w, http.StatusConflict, errors.New("job is not finished yet"))
+	}
+}
+
+type chunkCounter struct {
+	w     io.Writer
+	jobID string
+	queue *queue.Manager
+}
+
+func (c *chunkCounter) Write(p []byte) (int, error) {
+	c.queue.BumpChunk(c.jobID, p)
+	return c.w.Write(p)
 }
 
 type flushWriter struct {
@@ -279,13 +385,44 @@ func (fw *flushWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+func (fw *flushWriter) Flush() {
+	if f, ok := fw.w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	req, p, ok := s.decodeAndRoute(w, r)
 	if !ok {
 		return
 	}
 	if req.Stream {
-		writeError(w, http.StatusBadRequest, errors.New("stream is not supported for async jobs; use POST /v1/audio/speech"))
+		if streamer, ok := p.(provider.Streamer); ok {
+			job := s.queue.NewRunningJob(p.ID(), req)
+			go func() {
+				var buf bytes.Buffer
+				cw := &chunkCounter{w: &buf, jobID: job.ID, queue: s.queue}
+				err := streamer.SynthesizeStream(context.Background(), req, func(meta provider.StreamMeta) {}, cw)
+				if err != nil {
+					s.queue.FailJob(job.ID, err)
+					return
+				}
+				if s.audioStore != nil {
+					s.audioStore.Write(job.ID, buf.Bytes())
+				}
+				s.queue.CompleteJob(job.ID, provider.SpeechResult{
+					Audio:       buf.Bytes(),
+					ContentType: "audio/pcm",
+					ProviderID:  p.ID(),
+					Model:       p.ID(),
+					Voice:       req.Voice,
+					Format:      "pcm",
+				})
+			}()
+			writeJSON(w, http.StatusAccepted, s.jobStatusBody(job.ID))
+			return
+		}
+		writeError(w, http.StatusBadRequest, errors.New("streaming not supported by this provider"))
 		return
 	}
 
@@ -343,6 +480,9 @@ func (s *Server) jobStatusBody(id string) map[string]any {
 	}
 	if job.Status == queue.StatusFailed && job.Err != nil {
 		body["error"] = job.Err.Error()
+	}
+	if job.Status == queue.StatusRunning && job.StreamChunks > 0 {
+		body["stream_chunks"] = job.StreamChunks
 	}
 	return body
 }
@@ -424,8 +564,12 @@ func (s *Server) transcriptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), s.requestTimeout)
-	defer cancel()
+	ctx := r.Context()
+	if s.requestTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.requestTimeout)
+		defer cancel()
+	}
 	result, err := p.Transcribe(ctx, sttprovider.TranscriptionRequest{
 		Audio:    audio,
 		Filename: header.Filename,
@@ -488,6 +632,7 @@ var supportedFormats = map[string]bool{
 	"ogg":  true,
 	"opus": true,
 	"flac": true,
+	"pcm":  true,
 }
 
 func (s *Server) validateSpeech(req provider.SpeechRequest) error {
@@ -499,7 +644,7 @@ func (s *Server) validateSpeech(req provider.SpeechRequest) error {
 	}
 	format := normalizedFormat(req.ResponseFormat)
 	if !supportedFormats[format] {
-		return errors.New("response_format must be one of: mp3, wav, ogg, opus, flac")
+		return errors.New("response_format must be one of: mp3, wav, ogg, opus, flac, pcm")
 	}
 	if req.Speed != 0 && (req.Speed < 0.25 || req.Speed > 4.0) {
 		return errors.New("speed must be between 0.25 and 4.0")

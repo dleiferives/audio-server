@@ -44,6 +44,13 @@ type Job struct {
 	StartedAt  time.Time
 	FinishedAt time.Time
 
+	// StreamChunks counts audio chunks received during SSE streaming.
+	StreamChunks int
+
+	// StreamBus carries PCM chunks to zero or more subscribers during
+	// streaming synthesis. Closed when the stream ends.
+	StreamBus chan []byte
+
 	done chan struct{}
 }
 
@@ -204,6 +211,80 @@ func (m *Manager) Wait(ctx context.Context, id string) (Job, error) {
 		return result, nil
 	case <-ctx.Done():
 		return Job{}, ctx.Err()
+	}
+}
+
+// NewRunningJob creates a job that is already in StatusRunning state,
+// bypassing the worker queue. Used for streaming synthesis where the
+// caller drives execution directly.
+func (m *Manager) NewRunningJob(providerID string, req provider.SpeechRequest) *Job {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job := &Job{
+		ID:         newID(),
+		ProviderID: providerID,
+		Request:    req,
+		Status:     StatusRunning,
+		CreatedAt:  m.now(),
+		StartedAt:  m.now(),
+		done:       make(chan struct{}),
+		StreamBus:  make(chan []byte, 64),
+	}
+	m.jobs[job.ID] = job
+	return job
+}
+
+// CompleteJob marks a job as succeeded and closes its stream bus.
+func (m *Manager) CompleteJob(id string, result provider.SpeechResult) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j, ok := m.jobs[id]
+	if !ok {
+		return
+	}
+	j.FinishedAt = m.now()
+	j.Status = StatusSucceeded
+	j.Result = result
+	close(j.done)
+	if j.StreamBus != nil {
+		close(j.StreamBus)
+		j.StreamBus = nil
+	}
+}
+
+// FailJob marks a job as failed and closes its stream bus.
+func (m *Manager) FailJob(id string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j, ok := m.jobs[id]
+	if !ok {
+		return
+	}
+	j.FinishedAt = m.now()
+	j.Status = StatusFailed
+	j.Err = err
+	close(j.done)
+	if j.StreamBus != nil {
+		close(j.StreamBus)
+		j.StreamBus = nil
+	}
+}
+
+// BumpChunk increments the stream chunk counter for a running job
+// and pushes the PCM bytes to all stream subscribers.
+func (m *Manager) BumpChunk(id string, chunk []byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j, ok := m.jobs[id]
+	if !ok {
+		return
+	}
+	j.StreamChunks++
+	if j.StreamBus != nil {
+		select {
+		case j.StreamBus <- chunk:
+		default:
+		}
 	}
 }
 

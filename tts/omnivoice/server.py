@@ -96,18 +96,21 @@ class Engine:
             print("model unloaded", file=sys.stderr)
 
     def synthesize(self, text: str, language: str, steps: int, speed: float, seed: int,
-                   chunk_seconds: float, chunk_threshold: float) -> tuple[bytes, int]:
+                   chunk_seconds: float, chunk_threshold: float, instruct: str | None = None) -> tuple[bytes, int]:
         self.load()
         seed_everything(seed)
+        kwargs: dict[str, Any] = {
+            "text": text,
+            "language": language,
+            "num_step": steps,
+            "speed": speed,
+            "audio_chunk_duration": chunk_seconds,
+            "audio_chunk_threshold": chunk_threshold,
+        }
+        if instruct:
+            kwargs["instruct"] = instruct
         with self.lock:
-            audio = self.model.generate(
-                text=text,
-                language=language,
-                num_step=steps,
-                speed=speed,
-                audio_chunk_duration=chunk_seconds,
-                audio_chunk_threshold=chunk_threshold,
-            )[0]
+            audio = self.model.generate(**kwargs)[0]
             sample_rate = self.model.sampling_rate
         buf = BytesIO()
         sf.write(buf, audio, sample_rate, format="WAV", subtype="PCM_16")
@@ -183,6 +186,9 @@ class Handler(BaseHTTPRequestHandler):
         seed = int(payload.get("seed") or 42)
         chunk_seconds = float(payload.get("chunk_seconds") or DEFAULT_CHUNK_SECONDS)
         chunk_threshold = float(payload.get("chunk_threshold") or DEFAULT_CHUNK_THRESHOLD)
+        instruct = payload.get("instruct") or None
+        if instruct is not None:
+            instruct = str(instruct).strip()
 
         if steps < 1:
             self._send_error_json(400, "steps must be at least 1")
@@ -200,6 +206,7 @@ class Handler(BaseHTTPRequestHandler):
                 seed=seed,
                 chunk_seconds=chunk_seconds,
                 chunk_threshold=chunk_threshold,
+                instruct=instruct,
             )
         except torch.OutOfMemoryError:
             self._send_error_json(

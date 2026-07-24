@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -21,8 +22,10 @@ import (
 	"github.com/dleiferives/audio-server/internal/provider/fasterwhisper"
 	"github.com/dleiferives/audio-server/internal/provider/kokoro"
 	"github.com/dleiferives/audio-server/internal/provider/omnivoice"
+	"github.com/dleiferives/audio-server/internal/provider/supertonic"
 	"github.com/dleiferives/audio-server/internal/queue"
 	"github.com/dleiferives/audio-server/internal/server"
+	"github.com/dleiferives/audio-server/internal/store"
 	"github.com/dleiferives/audio-server/internal/sttprovider"
 )
 
@@ -30,55 +33,73 @@ func main() {
 	addr := flag.String("addr", env("AUDIO_ADDR", "127.0.0.1:8010"), "listen address")
 	apiKey := flag.String("api-key", env("AUDIO_API_KEY", ""), "optional bearer API key")
 	maxConcurrency := flag.Int("max-concurrency", envInt("AUDIO_MAX_CONCURRENCY", 2), "maximum concurrent synthesis requests")
-	requestTimeoutSeconds := flag.Int("request-timeout-seconds", envInt("AUDIO_REQUEST_TIMEOUT_SECONDS", 30), "synthesis request timeout in seconds")
-	maxInputChars := flag.Int("max-input-chars", envInt("AUDIO_MAX_INPUT_CHARS", 5000), "maximum input length in characters")
+	requestTimeoutSeconds := flag.Int("request-timeout-seconds", envInt("AUDIO_REQUEST_TIMEOUT_SECONDS", 0), "synthesis request timeout in seconds (0 = disabled)")
+	maxInputChars := flag.Int("max-input-chars", envInt("AUDIO_MAX_INPUT_CHARS", 1000000), "maximum input length in characters")
 	espeakPath := flag.String("espeak-path", env("AUDIO_ESPEAK_PATH", "espeak-ng"), "espeak-ng binary path")
 	ffmpegPath := flag.String("ffmpeg-path", env("AUDIO_FFMPEG_PATH", "ffmpeg"), "ffmpeg binary path")
 	mp3Bitrate := flag.String("mp3-bitrate", env("AUDIO_MP3_BITRATE", "48k"), "mp3 bitrate for generated speech")
 	defaultProvider := flag.String("default-provider", env("AUDIO_DEFAULT_PROVIDER", "espeak-ng"), "default provider id")
 	defaultVoice := flag.String("espeak-default-voice", env("AUDIO_ESPEAK_DEFAULT_VOICE", "en"), "default eSpeak voice")
 	omnivoiceAddr := flag.String("omnivoice-addr", env("AUDIO_OMNIVOICE_ADDR", ""), "OmniVoice sidecar base URL (e.g. http://127.0.0.1:8020); disabled when blank")
-	omnivoiceConcurrency := flag.Int("omnivoice-concurrency", envInt("AUDIO_OMNIVOICE_CONCURRENCY", 1), "concurrent OmniVoice workers (keep at 1 on limited VRAM)")
-	omnivoiceIdleUnloadSeconds := flag.Int("omnivoice-idle-unload-seconds", envInt("AUDIO_OMNIVOICE_IDLE_UNLOAD_SECONDS", 30), "seconds an empty OmniVoice queue waits before the model is unloaded")
+	omnivoiceConcurrency := flag.Int("omnivoice-concurrency", envInt("AUDIO_OMNIVOICE_CONCURRENCY", 1), "concurrent OmniVoice workers")
 	kokoroAddr := flag.String("kokoro-addr", env("AUDIO_KOKORO_ADDR", ""), "Kokoro TTS sidecar base URL (e.g. http://127.0.0.1:8021); disabled when blank")
-	kokoroConcurrency := flag.Int("kokoro-concurrency", envInt("AUDIO_KOKORO_CONCURRENCY", 1), "concurrent Kokoro workers (keep at 1 on limited VRAM)")
+	kokoroConcurrency := flag.Int("kokoro-concurrency", envInt("AUDIO_KOKORO_CONCURRENCY", 1), "concurrent Kokoro workers")
 	kokoroIdleUnloadSeconds := flag.Int("kokoro-idle-unload-seconds", envInt("AUDIO_KOKORO_IDLE_UNLOAD_SECONDS", 30), "seconds an empty Kokoro queue waits before the model is unloaded")
 	fasterWhisperAddr := flag.String("faster-whisper-addr", env("AUDIO_FASTERWHISPER_ADDR", ""), "faster-whisper sidecar base URL (e.g. http://127.0.0.1:8030); disabled when blank")
+	webDir := flag.String("web-dir", env("AUDIO_WEB_DIR", ""), "optional path to static web frontend directory")
+	audioTTL := flag.Int("audio-ttl-seconds", envInt("AUDIO_AUDIO_TTL_SECONDS", 0), "audio file retention in seconds (0 = forever)")
+	audioStoreDir := flag.String("audio-store-dir", env("AUDIO_STORE_DIR", ""), "directory for generated audio files (empty = in-memory)")
+	supertonicPort := flag.Int("supertonic-port", envInt("AUDIO_SUPERTONIC_PORT", 8022), "audiocpp_server port for Supertonic")
+	idleUnloadSeconds := flag.Int("model-idle-unload-seconds", envInt("AUDIO_MODEL_IDLE_UNLOAD_SECONDS", 600), "seconds before unloading idle GPU models (default 10 min)")
+	audiocppBin := flag.String("audiocpp-bin", env("AUDIO_AUDIOCPP_BIN", "audio.cpp/build/linux-cuda-release/bin/audiocpp_server"), "path to audiocpp_server binary")
+	audiocppCfgOmni := flag.String("audiocpp-omnivoice-cfg", env("AUDIO_AUDIOCPP_OMNIVOICE_CFG", "audio.cpp/omnivoice-config.json"), "config for OmniVoice instance")
+	audiocppCfgSuper := flag.String("audiocpp-supertonic-cfg", env("AUDIO_AUDIOCPP_SUPERTONIC_CFG", "audio.cpp/supertonic-config.json"), "config for Supertonic instance")
 	flag.Parse()
 
 	encoder := encode.NewFFmpeg(*ffmpegPath, *mp3Bitrate)
 	espeakProvider := espeak.New(*espeakPath, *defaultVoice, encoder)
 	providers := []provider.Provider{espeakProvider}
 	workers := map[string]int{espeakProvider.ID(): *maxConcurrency}
-	idleUnload := map[string]time.Duration{}
+
 	if strings.TrimSpace(*omnivoiceAddr) != "" {
-		omnivoiceProvider := omnivoice.New(*omnivoiceAddr, nil, encoder)
-		providers = append(providers, omnivoiceProvider)
-		workers[omnivoiceProvider.ID()] = *omnivoiceConcurrency
-		idleUnload[omnivoiceProvider.ID()] = time.Duration(*omnivoiceIdleUnloadSeconds) * time.Second
+		providers = append(providers, omnivoice.New(*omnivoiceAddr, nil, encoder))
+		workers["omnivoice"] = *omnivoiceConcurrency
+	}
+	if strings.TrimSpace(*omnivoiceAddr) != "" {
+		superAddr := fmt.Sprintf("http://127.0.0.1:%d", *supertonicPort)
+		providers = append(providers, supertonic.New(superAddr, nil, encoder))
+		workers["supertonic"] = 2
 	}
 	if strings.TrimSpace(*kokoroAddr) != "" {
-		kokoroProvider := kokoro.New(*kokoroAddr, nil, encoder)
-		providers = append(providers, kokoroProvider)
-		workers[kokoroProvider.ID()] = *kokoroConcurrency
-		idleUnload[kokoroProvider.ID()] = time.Duration(*kokoroIdleUnloadSeconds) * time.Second
+		providers = append(providers, kokoro.New(*kokoroAddr, nil, encoder))
+		workers["kokoro"] = *kokoroConcurrency
 	}
 
 	providerMap := make(map[string]provider.Provider, len(providers))
 	for _, p := range providers {
 		providerMap[p.ID()] = p
 	}
+
 	requestTimeout := time.Duration(*requestTimeoutSeconds) * time.Second
 	jobQueue := queue.NewManager(queue.Config{
 		Providers:         providerMap,
 		Workers:           workers,
-		IdleUnload:        idleUnload,
 		SynthesizeTimeout: requestTimeout,
 	})
 
 	var sttProviders []sttprovider.Provider
 	if strings.TrimSpace(*fasterWhisperAddr) != "" {
 		sttProviders = append(sttProviders, fasterwhisper.New(*fasterWhisperAddr, nil))
+	}
+
+	var audioStore *store.Store
+	if strings.TrimSpace(*audioStoreDir) != "" {
+		s, err := store.New(*audioStoreDir, time.Duration(*audioTTL)*time.Second)
+		if err != nil {
+			log.Fatalf("audio store: %v", err)
+		}
+		audioStore = s
+		log.Printf("audio store: %s (ttl=%s)", *audioStoreDir, time.Duration(*audioTTL)*time.Second)
 	}
 
 	audioServer, err := server.New(server.Config{
@@ -90,6 +111,8 @@ func main() {
 		Queue:           jobQueue,
 		StreamWorkers:   workers,
 		SttProviders:    sttProviders,
+		WebDir:          *webDir,
+		AudioStore:      audioStore,
 	})
 	if err != nil {
 		log.Fatalf("audio server: %v", err)
@@ -101,11 +124,9 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	log.Printf("serving on %s", httpURL(*addr))
 	errc := make(chan error, 1)
-	go func() {
-		log.Printf("audio server listening on %s", httpURL(*addr))
-		errc <- httpServer.ListenAndServe()
-	}()
+	go func() { errc <- httpServer.ListenAndServe() }()
 
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
@@ -119,9 +140,7 @@ func main() {
 		log.Printf("shutting down after %s", sig)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := httpServer.Shutdown(ctx); err != nil {
-			log.Fatalf("shutdown: %v", err)
-		}
+		httpServer.Shutdown(ctx)
 	}
 }
 
