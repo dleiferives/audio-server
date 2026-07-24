@@ -38,7 +38,10 @@ type Provider struct {
 	StartFunc func() error
 }
 
-var _ provider.Provider = Provider{}
+var (
+	_ provider.Provider = Provider{}
+	_ provider.Streamer = Provider{}
+)
 
 func New(baseURL string, client HTTPClient, enc Encoder) Provider {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
@@ -100,6 +103,7 @@ type speechRequest struct {
 	Language       string         `json:"language,omitempty"`
 	Speed          float64        `json:"speed,omitempty"`
 	ResponseFormat string         `json:"response_format,omitempty"`
+	StreamFormat   string         `json:"stream_format,omitempty"`
 	Options        map[string]any `json:"options,omitempty"`
 }
 
@@ -217,4 +221,98 @@ func synthesizeErrorDetail(status int, body []byte) string {
 		return parsed.Error.Message
 	}
 	return fmt.Sprintf("status %d: %s", status, strings.TrimSpace(string(body)))
+}
+
+// SynthesizeStream implements provider.Streamer using audiocpp_server's
+// SSE streaming endpoint for Supertonic.
+func (p Provider) SynthesizeStream(ctx context.Context, req provider.SpeechRequest, onHeader func(provider.StreamMeta), w io.Writer) error {
+	if p.StartFunc != nil {
+		if err := p.StartFunc(); err != nil {
+			return fmt.Errorf("%w: lifecycle start failed: %v", provider.ErrUnavailable, err)
+		}
+	}
+
+	language := normalizeLanguage(req.Language)
+	if language == "" {
+		language = defaultLang
+	}
+	voice := req.Voice
+	if strings.TrimSpace(voice) == "" || voice == "auto" {
+		voice = defaultVoice
+	}
+	speed := req.Speed
+	if speed <= 0 {
+		speed = defaultSpeed
+	}
+	input := norm.NFC.String(req.Input)
+
+	options := map[string]any{
+		"num_inference_steps": defaultSteps,
+		"text_chunk_size":     200,
+		"text_chunk_mode":     "tag_aware",
+	}
+	if req.Speed > 0 && req.Speed != defaultSpeed {
+		options["speed"] = req.Speed
+	}
+
+	sr := speechRequest{
+		Model:          id,
+		Input:          input,
+		Voice:          voice,
+		Language:       language,
+		Speed:          speed,
+		ResponseFormat: "pcm",
+		StreamFormat:   "sse",
+		Options:        options,
+	}
+
+	body, err := json.Marshal(sr)
+	if err != nil {
+		return fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.BaseURL+"/v1/audio/speech", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+
+	resp, err := p.Client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("%w: supertonic stream unreachable: %v", provider.ErrUnavailable, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("%w: supertonic stream failed: %s", provider.ErrUnavailable, synthesizeErrorDetail(resp.StatusCode, respBody))
+	}
+
+	headerSent := false
+	return readSSEEvents(resp.Body, func(event SSEEvent) error {
+		if !headerSent {
+			onHeader(provider.StreamMeta{
+				ProviderID:  id,
+				Model:       id,
+				Voice:       voice,
+				Format:      "pcm",
+				ContentType: "audio/pcm",
+			})
+			headerSent = true
+		}
+		switch event.Type {
+		case "speech.audio.delta":
+			chunk, err := DecodeBase64Chunk(event.Base64)
+			if err != nil {
+				return nil
+			}
+			if _, err := w.Write(chunk); err != nil {
+				return fmt.Errorf("%w: supertonic stream write: %v", provider.ErrUnavailable, err)
+			}
+		case "done", "speech.audio.done":
+			return io.EOF
+		}
+		return nil
+	})
 }
