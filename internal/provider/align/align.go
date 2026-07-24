@@ -1,4 +1,4 @@
-package provider
+package align
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	align "github.com/dleiferives/MFA-go"
 )
 
-type AlignProvider struct {
+type Provider struct {
 	mfa   *align.Provider
 	langs map[string]LanguageModel
 }
@@ -19,16 +19,16 @@ type LanguageModel struct {
 	G2P        string `yaml:"g2p,omitempty"`
 }
 
-func NewAlignProvider(mfaEnv, workDir, binDir string, langs map[string]LanguageModel) *AlignProvider {
+func NewAlignProvider(mfaEnv, workDir, binDir string, langs map[string]LanguageModel) *Provider {
 	p := align.New(align.Config{
 		MFAEnv:  mfaEnv,
 		WorkDir: workDir,
 		BinDir:  binDir,
 	})
-	return &AlignProvider{mfa: p, langs: langs}
+	return &Provider{mfa: p, langs: langs}
 }
 
-func (p *AlignProvider) Align(ctx context.Context, audio []byte, transcript, language string) (*align.Result, error) {
+func (p *Provider) Align(ctx context.Context, audio []byte, transcript, language string) (any, error) {
 	lang, ok := p.langs[normalizeLang(language)]
 	if !ok {
 		lang, ok = p.langs["en"]
@@ -46,7 +46,7 @@ func (p *AlignProvider) Align(ctx context.Context, audio []byte, transcript, lan
 	return p.mfa.Align(ctx, audio, transcript, lang.Acoustic, lang.Dictionary, g2pPath)
 }
 
-func (p *AlignProvider) Languages() []string {
+func (p *Provider) Languages() []string {
 	var langs []string
 	for k := range p.langs {
 		langs = append(langs, k)
@@ -54,7 +54,7 @@ func (p *AlignProvider) Languages() []string {
 	return langs
 }
 
-func (p *AlignProvider) HasLanguage(language string) bool {
+func (p *Provider) HasLanguage(language string) bool {
 	_, ok := p.langs[normalizeLang(language)]
 	return ok
 }

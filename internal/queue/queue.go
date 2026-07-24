@@ -53,6 +53,9 @@ type Job struct {
 	// streaming synthesis. Closed when the stream ends.
 	StreamBus chan []byte
 
+	// AlignResult holds the alignment output for alignment jobs.
+	AlignResult any
+
 	done   chan struct{}
 	stream *streamRequest
 }
@@ -362,6 +365,28 @@ func (m *Manager) BumpChunk(id string, chunk []byte) {
 		default:
 		}
 	}
+}
+
+// SetAlignResult stores the alignment result on a job.
+func (m *Manager) SetAlignResult(id string, result any) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j, ok := m.jobs[id]
+	if !ok {
+		return
+	}
+	j.AlignResult = result
+}
+
+// AlignResult returns the alignment result for a job.
+func (m *Manager) AlignResult(id string) any {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j, ok := m.jobs[id]
+	if !ok {
+		return nil
+	}
+	return j.AlignResult
 }
 
 func (m *Manager) worker(providerID string) {

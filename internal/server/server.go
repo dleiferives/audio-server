@@ -56,6 +56,17 @@ type Config struct {
 	// AudioStore persists generated audio to disk when set.
 	// Nil means audio is held in memory only.
 	AudioStore *store.Store
+
+	// AlignProvider handles forced alignment via MFA subprocess.
+	// Nil when alignment is disabled.
+	AlignProvider Aligner
+}
+
+// Aligner wraps the MFA-go alignment provider.
+type Aligner interface {
+	Align(ctx context.Context, audio []byte, transcript, language string) (any, error)
+	Languages() []string
+	HasLanguage(language string) bool
 }
 
 type Server struct {
@@ -72,6 +83,7 @@ type Server struct {
 	maxUploadBytes     int
 	webDir             string
 	audioStore         *store.Store
+	alignProvider      Aligner
 }
 
 func New(cfg Config) (*Server, error) {
@@ -974,4 +986,99 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+// ── alignment endpoints (active when AlignProvider is configured) ──
+
+func (s *Server) createAlignJob(w http.ResponseWriter, r *http.Request) {
+	if s.alignProvider == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("alignment not configured"))
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, int64(s.maxUploadBytes))
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("audio file is required"))
+		return
+	}
+	defer file.Close()
+	audio, err := io.ReadAll(file)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	transcript := r.FormValue("transcript")
+	if strings.TrimSpace(transcript) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("transcript is required"))
+		return
+	}
+	language := r.FormValue("language")
+	if !s.alignProvider.HasLanguage(language) {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("unsupported language: %s", language))
+		return
+	}
+
+	job := s.queue.NewRunningJob("align", provider.SpeechRequest{Input: transcript})
+	go func() {
+		result, err := s.alignProvider.Align(context.Background(), audio, transcript, language)
+		if err != nil {
+			s.queue.FailJob(job.ID, err)
+			return
+		}
+		s.queue.CompleteJob(job.ID, provider.SpeechResult{
+			Model:      "align/" + language,
+			ProviderID: "align",
+			Voice:      language,
+		})
+		if result != nil {
+			s.queue.SetAlignResult(job.ID, result)
+		}
+	}()
+	writeJSON(w, http.StatusAccepted, s.jobStatusBody(job.ID))
+}
+
+func (s *Server) getAlignJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, ok := s.queue.Get(id); !ok {
+		writeError(w, http.StatusNotFound, errors.New("unknown alignment job id"))
+		return
+	}
+	body := s.jobStatusBody(id)
+	ar := s.queue.AlignResult(id)
+	if ar != nil {
+		body["result"] = ar
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+func (s *Server) getAlignResult(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	job, ok := s.queue.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, errors.New("unknown alignment job id"))
+		return
+	}
+	switch job.Status {
+	case queue.StatusSucceeded:
+		ar := s.queue.AlignResult(id)
+		if ar == nil {
+			writeError(w, http.StatusNotFound, errors.New("alignment result not available"))
+			return
+		}
+		writeJSON(w, http.StatusOK, ar)
+	case queue.StatusFailed:
+		writeError(w, http.StatusNotFound, fmt.Errorf("alignment failed: %v", job.Err))
+	default:
+		writeError(w, http.StatusConflict, errors.New("alignment is not finished yet"))
+	}
+}
+
+func (s *Server) listAlignLanguages(w http.ResponseWriter, r *http.Request) {
+	languages := s.alignProvider.Languages()
+	sort.Strings(languages)
+	writeJSON(w, http.StatusOK, map[string]any{"languages": languages})
 }
