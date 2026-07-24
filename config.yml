@@ -24,6 +24,10 @@ supertonic_addr: "http://127.0.0.1:8022"
 audiocpp_bin: "audio.cpp/build/linux-cuda-release/bin/audiocpp_server"
 audiocpp_idle_unload_seconds: 600
 
+# ── STT (Nemotron 3.5 ASR via audio.cpp) ──
+stt_enabled: true
+nemotron_addr: "http://127.0.0.1:8024"
+
 # ── alignment (MFA) ──
 align_enabled: true
 align_mfa_env: "mfa/env"

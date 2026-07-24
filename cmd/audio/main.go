@@ -54,6 +54,8 @@ type configFile struct {
 	AudiocppIdleUnloadSeconds  int    `yaml:"audiocpp_idle_unload_seconds"`
 	KokoroEnabled              bool   `yaml:"kokoro_enabled"`
 	FasterWhisperEnabled       bool   `yaml:"faster_whisper_enabled"`
+	STTEnabled                 bool   `yaml:"stt_enabled"`
+	NemotronAddr               string `yaml:"nemotron_addr"`
 	AlignEnabled               bool   `yaml:"align_enabled"`
 	AlignMFAEnv                string `yaml:"align_mfa_env"`
 	AlignMFAWorkDir            string `yaml:"align_mfa_work_dir"`
@@ -95,6 +97,8 @@ func main() {
 	audiocppIdle := flag.Int("audiocpp-idle-unload-seconds", envInt("AUDIO_AUDIOCPP_IDLE_UNLOAD", cfg.AudiocppIdleUnloadSeconds), "seconds before unloading idle audiocpp_server instances")
 	kokoroEnabled := flag.Bool("kokoro-enabled", cfg.KokoroEnabled, "enable Kokoro TTS provider")
 	fasterWhisperEnabled := flag.Bool("faster-whisper-enabled", cfg.FasterWhisperEnabled, "enable faster-whisper STT provider")
+	sttEnabled := flag.Bool("stt-enabled", cfg.STTEnabled, "enable STT providers (Nemotron 3.5 ASR)")
+	nemotronAddr := flag.String("nemotron-addr", cfg.NemotronAddr, "Nemotron ASR sidecar base URL")
 	webDir := flag.String("web-dir", env("AUDIO_WEB_DIR", cfg.WebDir), "optional path to static web frontend directory")
 	audioTTL := flag.Int("audio-ttl-seconds", envInt("AUDIO_AUDIO_TTL_SECONDS", cfg.AudioTTLSeconds), "audio file retention in seconds (0 = forever)")
 	audioStoreDir := flag.String("audio-store-dir", env("AUDIO_STORE_DIR", cfg.AudioStoreDir), "directory for generated audio files (empty = in-memory)")
@@ -168,8 +172,9 @@ func main() {
 	if *fasterWhisperEnabled {
 		fwAddr := env("AUDIO_FASTERWHISPER_ADDR", "http://127.0.0.1:8030")
 		sttProviders = append(sttProviders, fasterwhisper.New(fwAddr, nil))
-		nemotronAddr := env("AUDIO_NEMOTRON_ADDR", "http://127.0.0.1:8024")
-		sttProviders = append(sttProviders, nemotron.New(nemotronAddr, nil))
+	}
+	if *sttEnabled && strings.TrimSpace(*nemotronAddr) != "" {
+		sttProviders = append(sttProviders, nemotron.New(*nemotronAddr, nil))
 	}
 
 	var audioStore *store.Store
