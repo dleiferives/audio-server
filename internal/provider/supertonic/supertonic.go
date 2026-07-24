@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/dleiferives/audio-server/internal/provider"
+	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -140,6 +141,10 @@ func (p Provider) Synthesize(ctx context.Context, req provider.SpeechRequest) (p
 		voice = defaultVoice
 	}
 
+	// NFC-normalize text: combining accents → precomposed chars
+	// (fixes Greek codepoint errors with the unicode indexer)
+	input := norm.NFC.String(req.Input)
+
 	options := map[string]any{
 		"num_inference_steps": defaultSteps,
 	}
@@ -149,7 +154,7 @@ func (p Provider) Synthesize(ctx context.Context, req provider.SpeechRequest) (p
 
 	sr := speechRequest{
 		Model:          id,
-		Input:          req.Input,
+		Input:          input,
 		Voice:          voice,
 		Language:       language,
 		Speed:          speed,
