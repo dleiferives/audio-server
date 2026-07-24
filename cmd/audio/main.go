@@ -22,6 +22,7 @@ import (
 	"github.com/dleiferives/audio-server/internal/provider/espeak"
 	"github.com/dleiferives/audio-server/internal/provider/fasterwhisper"
 	"github.com/dleiferives/audio-server/internal/provider/kokoro"
+	"github.com/dleiferives/audio-server/internal/provider/nemotron"
 	"github.com/dleiferives/audio-server/internal/provider/omnivoice"
 	"github.com/dleiferives/audio-server/internal/provider/supertonic"
 	"github.com/dleiferives/audio-server/internal/queue"
@@ -167,6 +168,8 @@ func main() {
 	if *fasterWhisperEnabled {
 		fwAddr := env("AUDIO_FASTERWHISPER_ADDR", "http://127.0.0.1:8030")
 		sttProviders = append(sttProviders, fasterwhisper.New(fwAddr, nil))
+		nemotronAddr := env("AUDIO_NEMOTRON_ADDR", "http://127.0.0.1:8024")
+		sttProviders = append(sttProviders, nemotron.New(nemotronAddr, nil))
 	}
 
 	var audioStore *store.Store

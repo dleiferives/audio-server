@@ -10,6 +10,7 @@ SERVER_PORT    ?= 8010
 OMNIVOICE_PORT ?= 8020
 SUPERTONIC_PORT ?= 8022
 KOKORO_PORT    ?= 8021
+NEMOTRON_PORT  ?= 8024
 WHISPER_PORT   ?= 8030
 
 # ── frontend ──
@@ -67,6 +68,10 @@ run: build
 		echo '  →   launching faster-whisper sidecar on :$(WHISPER_PORT)'; \
 		./stt/fasterwhisper/server.py --port $(WHISPER_PORT) & echo $$! > $(PIDIR)/whisper.pid; \
 	fi; \
+	if [ "$(FASTERWHISPER)" = "1" ]; then \
+		echo '  →   launching nemotron ASR on :$(NEMOTRON_PORT)'; \
+		$(AUDIOCPP_BIN) --config audio.cpp/nemotron-config.json & echo $$! > $(PIDIR)/nemotron.pid; \
+	fi; \
 	if [ "$(OMNIVOICE)" = "1" ]; then \
 		echo '  →   skipping wait for lifecycle-managed GPU models'; \
 	fi; \
@@ -84,30 +89,9 @@ run: build
 			sleep 0.5; \
 		done; \
 	fi; \
-	ARGS=""; \
-	if [ "$(OMNIVOICE)" = "1" ]; then \
-		ARGS="$$ARGS -omnivoice-addr=http://127.0.0.1:$(OMNIVOICE_PORT) -omnivoice-concurrency=1"; \
-		ARGS="$$ARGS -supertonic-addr=http://127.0.0.1:$(SUPERTONIC_PORT)"; \
-	fi; \
-	if [ "$(KOKORO)" = "1" ]; then \
-		ARGS="$$ARGS -kokoro-addr=http://127.0.0.1:$(KOKORO_PORT) -kokoro-concurrency=1 -kokoro-idle-unload-seconds=30"; \
-	fi; \
-	if [ "$(FASTERWHISPER)" = "1" ]; then \
-		ARGS="$$ARGS -faster-whisper-addr=http://127.0.0.1:$(WHISPER_PORT)"; \
-	fi; \
 	echo '  → starting audio server on :$(SERVER_PORT)'; \
 	$(BIN) \
-		-addr=127.0.0.1:$(SERVER_PORT) \
-		-default-provider=$(DEFAULT_PROVIDER) \
-		-max-concurrency=$(MAX_CONCURRENCY) \
-		-request-timeout-seconds=$(TIMEOUT) \
-		-max-input-chars=$(MAX_CHARS) \
-		-espeak-default-voice=$(ESPEAK_VOICE) \
-		-mp3-bitrate=$(MP3_BITRATE) \
-		-web-dir=$(WEB_DIR) \
-		-audio-store-dir=audio-output \
-		-audio-ttl-seconds=0 \
-		$$ARGS & echo $$! > $(PIDIR)/server.pid; \
+		-config=$(CURDIR)/config.yml & echo $$! > $(PIDIR)/server.pid; \
 	wait $$(cat $(PIDIR)/server.pid) || true; \
 	$(MAKE) --no-print-directory stop
 
