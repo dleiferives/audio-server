@@ -1,3 +1,6 @@
 [submodule "audio.cpp"]
 	path = audio.cpp
 	url = https://github.com/0xShug0/audio.cpp.git
+[submodule "mfa-go"]
+	path = mfa-go
+	url = /home/dleiferives/projs/MFA-go

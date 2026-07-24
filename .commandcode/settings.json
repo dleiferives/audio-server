@@ -61,7 +61,8 @@
       "Shell(fuser -k 8010/tcp 2>/dev/null; fuser -k 8020/tcp 2>/dev/null; sleep 1; echo ok)",
       "Shell(fuser -k 8010/tcp 2>/dev/null; fuser -k 8020/tcp 2>/dev/null; sleep 1; cd /media/dleiferives/projects/projs/audio-server && rm -rf .pids && go build -o bin/audio-server ./cmd/audio 2>&1 && touch .built-audiocpp && echo \"ready\")",
       "Shell(fuser -k 8010/tcp 2>/dev/null; fuser -k 8020/tcp 2>/dev/null; sleep 1 cd /media/dleiferives/projects/projs/audio-server && ./audio.cpp/build/linux-cuda-release/bin/audiocpp_server --config audio.cpp/omnivoice-server.json 2>&1 & sleep 4 echo \"=== Direct SSE test ===\" curl -sS -N http://127.0.0.1:8020/v1/audio/speech -H 'Content-Type: application/json' -H 'Accept: text/event-stream' -d '{\"model\":\"omnivoice\",\"input\":\"Hello world\",\"stream_format\":\"sse\",\"response_format\":\"pcm\",\"options\":{\"text_chunk_size\":100}}' --max-time 30 -o /tmp/sse-raw.txt 2>&1 echo \"=== result ===\" wc -l /tmp/sse-raw.txt head -5 /tmp/sse-raw.txt echo \"---\" tail -5 /tmp/sse-raw.txt echo \"=== non-SSE test ===\" curl -sS http://127.0.0.1:8020/v1/audio/speech -H 'Content-Type: application/json' -d '{\"model\":\"omnivoice\",\"input\":\"hello\"}' -o /tmp/basic.wav -w \"HTTP %{http_code} %{size_download}b %{time_total}s\\n\" kill %1 2>/dev/null; wait %1 2>/dev/null)",
-      "Shell(fuser -k 8020/tcp 2>/dev/null; echo \"freed 8020\"; fuser -k 8010/tcp 2>/dev/null; echo \"freed 8010\")"
+      "Shell(fuser -k 8020/tcp 2>/dev/null; echo \"freed 8020\"; fuser -k 8010/tcp 2>/dev/null; echo \"freed 8010\")",
+      "Shell(ls /home/dleiferives/tmp/align/.env/bin/compute-mfcc-feats /home/dleiferives/tmp/align/.env/bin/gmm-align-compiled /home/dleiferives/tmp/align/.env/bin/compile-train-graphs 2>&1; echo \"===\"; file /home/dleiferives/tmp/align/.env/bin/gmm-align-compiled 2>&1)"
     ],
     "deny": [],
     "defaultMode": "default"
