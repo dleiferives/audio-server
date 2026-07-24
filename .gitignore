@@ -6,3 +6,5 @@ __pycache__/
 /.built-audiocpp
 /audio.cpp/build/
 /audio-output/
+/mfa/work/
+/mfa/.mamba/

@@ -134,3 +134,22 @@ Used in place of Piper (issue #4), which doesn't run on the target hardware. See
 ## faster-whisper (STT)
 
 See [`docs/providers.md`](docs/providers.md#faster-whisper) for the sidecar provider and why STT doesn't go through the same job queue as TTS.
+
+## Forced Alignment (MFA)
+
+Call MFA's `align` via Go subprocess. Micromamba environment at `mfa/env/`,
+pretrained models at `mfa/pretrained_models/`.
+
+```bash
+curl -sS http://127.0.0.1:8010/v1/audio/alignments \
+  -F file=@speech.wav \
+  -F transcript="the text that was spoken" \
+  -F language=el
+```
+
+Language codes map to MFA model names via `mfa/models.yaml`.
+
+> **TODO:** Replace the MFA subprocess call with direct Kaldi CGo wiring
+> (`gmm-align-compiled` + `compile-train-graphs`).  The Kaldi C++ libraries
+> already ship inside the micromamba environment; the CGo path would remove
+> the Python orchestration layer while keeping the same GMM-HMM models.
