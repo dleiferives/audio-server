@@ -82,6 +82,16 @@ Requires `AUDIO_FASTERWHISPER_ADDR` to be set — see [`docs/providers.md`](docs
 curl -sS 'http://127.0.0.1:8010/v1/audio/voices?language=en'
 ```
 
+List all provider languages and canonical voices:
+
+```bash
+curl -sS http://127.0.0.1:8010/v1/audio/capabilities
+```
+
+Both `language` and `voice` default to `auto` when omitted. `auto` is a
+provider-defined automatic/default selection; use the capabilities endpoint
+and the language-filtered voices endpoint when a concrete choice is needed.
+
 ## Health check
 
 ```bash
@@ -95,7 +105,7 @@ curl -sS http://127.0.0.1:8010/healthz
 | `AUDIO_ADDR` | `127.0.0.1:8010` | listen address |
 | `AUDIO_API_KEY` | _(empty)_ | optional bearer token |
 | `AUDIO_MAX_CONCURRENCY` | `2` | max concurrent synthesis processes |
-| `AUDIO_REQUEST_TIMEOUT_SECONDS` | `30` | per-request synthesis timeout |
+| `AUDIO_REQUEST_TIMEOUT_SECONDS` | `0` | per-request synthesis timeout (`0` disables the timeout) |
 | `AUDIO_MAX_INPUT_CHARS` | `5000` | max request input length |
 | `AUDIO_ESPEAK_PATH` | `espeak-ng` | eSpeak binary path |
 | `AUDIO_ESPEAK_DEFAULT_VOICE` | `en` | fallback eSpeak voice |
@@ -104,7 +114,8 @@ curl -sS http://127.0.0.1:8010/healthz
 | `AUDIO_DEFAULT_PROVIDER` | `espeak-ng` | provider used for `auto`, `tts-1`, and blank model |
 | `AUDIO_OMNIVOICE_ADDR` | _(empty)_ | OmniVoice sidecar base URL, e.g. `http://127.0.0.1:8020`; provider disabled when blank |
 | `AUDIO_OMNIVOICE_CONCURRENCY` | `1` | concurrent OmniVoice workers — keep at 1 on a single GPU with limited VRAM |
-| `AUDIO_OMNIVOICE_IDLE_UNLOAD_SECONDS` | `30` | seconds an empty OmniVoice queue waits before the model is unloaded from VRAM |
+| `AUDIO_AUDIOCPP_IDLE_UNLOAD` | `600` | seconds an empty OmniVoice/Supertonic queue waits before the native sidecar is unloaded |
+| `AUDIO_RESOURCE_SWITCH_DELAY_SECONDS` | `1` | quiet seconds after one audio.cpp provider finishes before another shared-GPU provider starts |
 | `AUDIO_KOKORO_ADDR` | _(empty)_ | Kokoro sidecar base URL, e.g. `http://127.0.0.1:8021`; provider disabled when blank |
 | `AUDIO_KOKORO_CONCURRENCY` | `1` | concurrent Kokoro workers |
 | `AUDIO_KOKORO_IDLE_UNLOAD_SECONDS` | `30` | seconds an empty Kokoro queue waits before the model is unloaded |

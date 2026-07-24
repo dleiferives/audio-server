@@ -41,6 +41,63 @@ func TestSpeechReturnsProviderAudio(t *testing.T) {
 	}
 }
 
+func TestSpeechValidatesVoiceAgainstLanguage(t *testing.T) {
+	var synthesized bool
+	s := newTestServer(t, fakeProvider{
+		voicesHook: func(_ context.Context, language string) ([]provider.Voice, error) {
+			if language != "el" {
+				t.Fatalf("language = %q, want el", language)
+			}
+			return []provider.Voice{{Provider: "fake", Voice: "F1", Language: "el", Name: "Female 1"}}, nil
+		},
+		synthesizeHook: func(provider.SpeechRequest) { synthesized = true },
+	}, Config{})
+	resp := request(t, s, http.MethodPost, "/v1/audio/speech", `{"input":"hello","language":"el","voice":"en-us"}`, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if synthesized {
+		t.Fatal("provider synthesized a voice that is not available for the language")
+	}
+}
+
+func TestSpeechDefaultsVoiceToAutoForLanguage(t *testing.T) {
+	var got provider.SpeechRequest
+	s := newTestServer(t, fakeProvider{
+		voicesHook: func(_ context.Context, language string) ([]provider.Voice, error) {
+			if language != "el" {
+				t.Fatalf("language = %q, want el", language)
+			}
+			return []provider.Voice{{Provider: "fake", Voice: "F1", Language: "el", Name: "Female 1"}}, nil
+		},
+		synthesizeHook: func(req provider.SpeechRequest) { got = req },
+	}, Config{})
+	resp := request(t, s, http.MethodPost, "/v1/audio/speech", `{"input":"hello","language":"el"}`, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if got.Voice != "auto" || got.Language != "el" {
+		t.Fatalf("request = %+v, want voice auto and language el", got)
+	}
+}
+
+func TestSpeechDefaultsLanguageToAuto(t *testing.T) {
+	var got provider.SpeechRequest
+	s := newTestServer(t, fakeProvider{
+		synthesizeHook: func(req provider.SpeechRequest) { got = req },
+	}, Config{})
+	resp := request(t, s, http.MethodPost, "/v1/audio/speech", `{"input":"hello"}`, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if got.Language != "auto" || got.Voice != "auto" {
+		t.Fatalf("request = %+v, want language and voice auto", got)
+	}
+}
+
 func TestSpeechValidation(t *testing.T) {
 	s := newTestServer(t, fakeProvider{}, Config{})
 	tests := []string{
@@ -113,6 +170,26 @@ func TestHealthReportsProviderFailure(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+}
+
+func TestHealthReportsColdLifecycleProviderAsConfigured(t *testing.T) {
+	p := fakeManagedProvider{fakeProvider: fakeProvider{id: "managed", healthErr: provider.ErrUnavailable}}
+	s := newTestServerWithProvider(t, p, "managed", Config{})
+	resp := request(t, s, http.MethodGet, "/healthz", "", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for a cold managed provider", resp.StatusCode)
+	}
+	var body struct {
+		Status    string            `json:"status"`
+		Providers map[string]string `json:"providers"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Status != "ok" || body.Providers["managed"] != "cold" {
+		t.Fatalf("unexpected health body: %+v", body)
 	}
 }
 
@@ -217,6 +294,24 @@ func TestStreamSpeechUsesStreamer(t *testing.T) {
 		t.Fatalf("body = %q", body)
 	}
 	if resp.Header.Get("X-TTS-Provider") != "fake" || resp.Header.Get("Content-Type") != "audio/wav" {
+		t.Fatalf("unexpected headers: %v", resp.Header)
+	}
+}
+
+func TestLifecycleStreamSpeechUsesQueueAndStreamer(t *testing.T) {
+	p := fakeManagedStreamer{fakeStreamer: fakeStreamer{fakeProvider: fakeProvider{id: "managed"}}}
+	s := newTestServerWithProvider(t, p, "managed", Config{})
+
+	resp := request(t, s, http.MethodPost, "/v1/audio/speech", `{"input":"hello","stream":true}`, "")
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if string(body) != "streamed-bytes" {
+		t.Fatalf("body = %q", body)
+	}
+	if resp.Header.Get("X-TTS-Provider") != "managed" || resp.Header.Get("Content-Type") != "audio/wav" {
 		t.Fatalf("unexpected headers: %v", resp.Header)
 	}
 }
@@ -335,6 +430,34 @@ func TestVoices(t *testing.T) {
 	}
 }
 
+func TestCapabilities(t *testing.T) {
+	s := newTestServer(t, fakeProvider{
+		voices: []provider.Voice{
+			{Provider: "fake", Voice: "el-1", Language: "el", Name: "Greek"},
+			{Provider: "fake", Voice: "en-1", Language: "en/en-us", Name: "English"},
+		},
+	}, Config{})
+	resp := request(t, s, http.MethodGet, "/v1/audio/capabilities", "", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var body struct {
+		Languages []string `json:"languages"`
+		Providers []struct {
+			Provider  string           `json:"provider"`
+			Languages []string         `json:"languages"`
+			Voices    []provider.Voice `json:"voices"`
+		} `json:"providers"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(body.Languages, ",") != "auto,el,en,en-us" || len(body.Providers) != 1 || len(body.Providers[0].Voices) != 2 {
+		t.Fatalf("unexpected capabilities: %+v", body)
+	}
+}
+
 func newTestServer(t *testing.T, p fakeProvider, cfg Config) *Server {
 	t.Helper()
 	if p.id == "" {
@@ -400,19 +523,28 @@ type fakeProvider struct {
 	synthesizeErr  error
 	delay          time.Duration
 	synthesizeHook func(provider.SpeechRequest)
+	voicesHook     func(context.Context, string) ([]provider.Voice, error)
 }
 
 func (f fakeProvider) ID() string {
 	return f.id
 }
 
+func (f fakeProvider) SupportsAutoLanguage() bool { return true }
+
 func (f fakeProvider) Health(context.Context) error {
 	return f.healthErr
 }
 
-func (f fakeProvider) Voices(context.Context, string) ([]provider.Voice, error) {
+func (f fakeProvider) Voices(ctx context.Context, language string) ([]provider.Voice, error) {
 	if f.healthErr != nil {
 		return nil, f.healthErr
+	}
+	if f.voicesHook != nil {
+		return f.voicesHook(ctx, language)
+	}
+	if f.voices == nil && language == "auto" {
+		return []provider.Voice{{Provider: f.id, Voice: "v", Language: "auto", Name: "Default"}}, nil
 	}
 	return f.voices, nil
 }
@@ -420,6 +552,19 @@ func (f fakeProvider) Voices(context.Context, string) ([]provider.Voice, error) 
 type fakeStreamer struct {
 	fakeProvider
 }
+
+type fakeManagedProvider struct {
+	fakeProvider
+}
+
+type fakeManagedStreamer struct {
+	fakeStreamer
+}
+
+func (fakeManagedProvider) Warm(context.Context) error { return nil }
+func (fakeManagedProvider) Idle(context.Context) error { return nil }
+func (fakeManagedStreamer) Warm(context.Context) error { return nil }
+func (fakeManagedStreamer) Idle(context.Context) error { return nil }
 
 func (f fakeStreamer) SynthesizeStream(_ context.Context, req provider.SpeechRequest, onHeader func(provider.StreamMeta), w io.Writer) error {
 	onHeader(provider.StreamMeta{ProviderID: f.id, Model: f.id, Voice: "v", Format: "wav", ContentType: "audio/wav"})

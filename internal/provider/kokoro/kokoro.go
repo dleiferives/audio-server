@@ -57,6 +57,8 @@ func (p Provider) ID() string {
 	return id
 }
 
+func (p Provider) SupportsAutoLanguage() bool { return true }
+
 func (p Provider) Health(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.BaseURL+"/health", nil)
 	if err != nil {
@@ -83,32 +85,47 @@ type voicesResponse struct {
 	} `json:"voices"`
 }
 
+var staticVoices = []provider.Voice{
+	{Provider: id, Voice: "af_heart", Language: "en-us", Name: "American English (female)"},
+	{Provider: id, Voice: "af_bella", Language: "en-us", Name: "American English (female)"},
+	{Provider: id, Voice: "af_nicole", Language: "en-us", Name: "American English (female)"},
+	{Provider: id, Voice: "am_adam", Language: "en-us", Name: "American English (male)"},
+	{Provider: id, Voice: "am_michael", Language: "en-us", Name: "American English (male)"},
+	{Provider: id, Voice: "bf_emma", Language: "en-gb", Name: "British English (female)"},
+	{Provider: id, Voice: "bf_isabella", Language: "en-gb", Name: "British English (female)"},
+	{Provider: id, Voice: "bm_george", Language: "en-gb", Name: "British English (male)"},
+	{Provider: id, Voice: "bm_lewis", Language: "en-gb", Name: "British English (male)"},
+}
+
 func (p Provider) Voices(ctx context.Context, language string) ([]provider.Voice, error) {
+	language = normalizeLanguage(language)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.BaseURL+"/voices", nil)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
+		return filterVoices(staticVoices, language), nil
 	}
 	resp, err := p.Client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: kokoro sidecar unreachable: %v", provider.ErrUnavailable, err)
+		return filterVoices(staticVoices, language), nil
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
+		return filterVoices(staticVoices, language), nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%w: kokoro voices status %d: %s", provider.ErrUnavailable, resp.StatusCode, string(body))
+		return filterVoices(staticVoices, language), nil
 	}
 	var parsed voicesResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, fmt.Errorf("%w: invalid voices response: %v", provider.ErrUnavailable, err)
+		return filterVoices(staticVoices, language), nil
+	}
+	if len(parsed.Voices) == 0 {
+		return filterVoices(staticVoices, language), nil
 	}
 
-	language = normalizeLanguage(language)
 	voices := make([]provider.Voice, 0, len(parsed.Voices))
 	for _, v := range parsed.Voices {
-		if language != "" && normalizeLanguage(v.Language) != language {
+		if language != "" && language != "auto" && !languagesMatch(normalizeLanguage(v.Language), language) {
 			continue
 		}
 		voices = append(voices, provider.Voice{
@@ -120,6 +137,34 @@ func (p Provider) Voices(ctx context.Context, language string) ([]provider.Voice
 		})
 	}
 	return voices, nil
+}
+
+func filterVoices(voices []provider.Voice, language string) []provider.Voice {
+	filtered := make([]provider.Voice, 0, len(voices))
+	for _, voice := range voices {
+		if language != "" && language != "auto" && !languagesMatch(normalizeLanguage(voice.Language), language) {
+			continue
+		}
+		filtered = append(filtered, voice)
+	}
+	return filtered
+}
+
+func (p Provider) Languages(context.Context) ([]string, error) {
+	return []string{"en-us", "en-gb"}, nil
+}
+
+func languagesMatch(available, requested string) bool {
+	if available == requested {
+		return true
+	}
+	if strings.Contains(requested, "-") {
+		return false
+	}
+	if i := strings.IndexByte(available, '-'); i >= 0 {
+		available = available[:i]
+	}
+	return available == requested
 }
 
 // Warm loads the model into the sidecar, blocking until it's ready.
@@ -174,7 +219,7 @@ func (p Provider) Synthesize(ctx context.Context, req provider.SpeechRequest) (p
 	}
 
 	language := normalizeLanguage(req.Language)
-	if language == "" {
+	if language == "" || language == "auto" {
 		language = defaultLang
 	}
 	voice := strings.TrimSpace(req.Voice)

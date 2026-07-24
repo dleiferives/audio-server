@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -152,6 +154,7 @@ func New(cfg Config) (*Server, error) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
+	mux.HandleFunc("GET /v1/audio/capabilities", s.auth(s.capabilities))
 	mux.HandleFunc("GET /v1/audio/voices", s.auth(s.voices))
 	mux.HandleFunc("POST /v1/audio/speech", s.auth(s.speech))
 	mux.HandleFunc("POST /v1/audio/jobs", s.auth(s.createJob))
@@ -174,6 +177,13 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	checks := make(map[string]string, len(s.providers)+len(s.sttProviders))
 	for id, p := range s.providers {
 		if err := p.Health(ctx); err != nil {
+			if _, lifecycleManaged := p.(provider.Lifecycle); lifecycleManaged {
+				// Lifecycle-managed providers are allowed to be cold: their
+				// sidecar is started by the queue when a job reaches the shared
+				// resource, rather than being required to stay up for /healthz.
+				checks[id] = "cold"
+				continue
+			}
 			status = http.StatusServiceUnavailable
 			checks[id] = err.Error()
 			continue
@@ -201,12 +211,124 @@ func (s *Server) voices(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("unknown audio provider"))
 		return
 	}
-	voices, err := p.Voices(r.Context(), r.URL.Query().Get("language"))
+	language := normalizeLanguage(r.URL.Query().Get("language"))
+	if language == "auto" && !supportsAutoLanguage(p) {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("provider %q does not support language auto", p.ID()))
+		return
+	}
+	voices, err := p.Voices(r.Context(), language)
 	if err != nil {
 		writeProviderError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"voices": voices})
+}
+
+type providerCapabilities struct {
+	Provider  string           `json:"provider"`
+	Languages []string         `json:"languages"`
+	Voices    []provider.Voice `json:"voices"`
+}
+
+// capabilities exposes the complete TTS catalog known by this audio-server.
+// Clients can use the language list to populate a language picker, then call
+// /v1/audio/voices with provider+language to get only compatible voices.
+func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
+	ids := make([]string, 0, len(s.providers))
+	for id := range s.providers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	allLanguages := make(map[string]bool)
+	providers := make([]providerCapabilities, 0, len(ids))
+	for _, id := range ids {
+		p := s.providers[id]
+		voices, err := p.Voices(r.Context(), "")
+		if err != nil {
+			writeProviderError(w, err)
+			return
+		}
+		languages, err := providerLanguages(r.Context(), p, voices)
+		if err != nil {
+			writeProviderError(w, err)
+			return
+		}
+		for _, language := range languages {
+			allLanguages[language] = true
+		}
+		if autoProvider, ok := p.(provider.AutoLanguageProvider); ok && autoProvider.SupportsAutoLanguage() {
+			languages = appendLanguage(languages, "auto")
+			allLanguages["auto"] = true
+		}
+		providers = append(providers, providerCapabilities{
+			Provider:  id,
+			Languages: languages,
+			Voices:    voices,
+		})
+	}
+
+	languages := make([]string, 0, len(allLanguages))
+	for language := range allLanguages {
+		languages = append(languages, language)
+	}
+	sort.Strings(languages)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"languages": languages,
+		"providers": providers,
+	})
+}
+
+func providerLanguages(ctx context.Context, p provider.Provider, voices []provider.Voice) ([]string, error) {
+	if catalog, ok := p.(provider.LanguageCatalog); ok {
+		languages, err := catalog.Languages(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return normalizedLanguages(languages), nil
+	}
+
+	seen := make(map[string]bool)
+	var languages []string
+	for _, voice := range voices {
+		for _, language := range strings.Split(voice.Language, "/") {
+			language = normalizeLanguage(language)
+			if language != "" && !seen[language] {
+				seen[language] = true
+				languages = append(languages, language)
+			}
+		}
+	}
+	sort.Strings(languages)
+	return languages, nil
+}
+
+func normalizedLanguages(languages []string) []string {
+	seen := make(map[string]bool)
+	result := make([]string, 0, len(languages))
+	for _, language := range languages {
+		language = normalizeLanguage(language)
+		if language != "" && !seen[language] {
+			seen[language] = true
+			result = append(result, language)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func appendLanguage(languages []string, language string) []string {
+	if language = normalizeLanguage(language); language == "" {
+		return languages
+	}
+	for _, existing := range languages {
+		if existing == language {
+			return languages
+		}
+	}
+	result := append(append([]string(nil), languages...), language)
+	sort.Strings(result)
+	return result
 }
 
 func (s *Server) speech(w http.ResponseWriter, r *http.Request) {
@@ -217,6 +339,12 @@ func (s *Server) speech(w http.ResponseWriter, r *http.Request) {
 
 	if req.Stream {
 		if streamer, ok := p.(provider.Streamer); ok {
+			if _, lifecycleManaged := p.(provider.Lifecycle); lifecycleManaged {
+				// Queue the stream so lifecycle warm-up and shared-resource
+				// handoff happen before the first response bytes are written.
+				s.queuedStreamSpeech(w, r, req, p.ID(), streamer)
+				return
+			}
 			s.streamSpeech(w, r, req, p.ID(), streamer)
 			return
 		}
@@ -245,6 +373,57 @@ func (s *Server) speech(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeAudio(w, finished.Result)
+}
+
+// queuedStreamSpeech keeps a lifecycle-managed stream live for the caller,
+// while making the queue own provider warm-up and shared-resource scheduling.
+// The provider's SSE/audio chunks are written only after its job reaches the
+// front of the queue and its model is warm.
+func (s *Server) queuedStreamSpeech(w http.ResponseWriter, r *http.Request, req provider.SpeechRequest, providerID string, streamer provider.Streamer) {
+	ctx := r.Context()
+	if s.requestTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.requestTimeout)
+		defer cancel()
+	}
+
+	var headerWritten atomic.Bool
+	fw := &flushWriter{w: w}
+	job, err := s.queue.SubmitStream(providerID, req, ctx, streamer, func(id string) {
+		w.Header().Set("X-Job-ID", id)
+	}, func(meta provider.StreamMeta) {
+		w.Header().Set("Content-Type", meta.ContentType)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-TTS-Provider", meta.ProviderID)
+		w.Header().Set("X-TTS-Model", meta.Model)
+		w.Header().Set("X-TTS-Voice", meta.Voice)
+		w.Header().Set("X-TTS-Format", meta.Format)
+		w.Header().Set("Transfer-Encoding", "chunked")
+		headerWritten.Store(true)
+		w.WriteHeader(http.StatusOK)
+		fw.Flush()
+	}, fw)
+	if err != nil {
+		writeProviderError(w, err)
+		return
+	}
+
+	finished, err := s.queue.Wait(ctx, job.ID)
+	if err != nil {
+		if !headerWritten.Load() {
+			writeProviderError(w, err)
+		}
+		return
+	}
+	if finished.Status == queue.StatusFailed {
+		if !headerWritten.Load() {
+			writeProviderError(w, finished.Err)
+		}
+		return
+	}
+	if s.audioStore != nil {
+		_ = s.audioStore.Write(job.ID, finished.Result.Audio)
+	}
 }
 
 // streamSpeech writes audio progressively as the provider produces it.
@@ -398,32 +577,38 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Stream {
 		if streamer, ok := p.(provider.Streamer); ok {
-			job := s.queue.NewRunningJob(p.ID(), req)
-			go func() {
-				var buf bytes.Buffer
-				cw := &chunkCounter{w: &buf, jobID: job.ID, queue: s.queue}
-				err := streamer.SynthesizeStream(context.Background(), req, func(meta provider.StreamMeta) {}, cw)
-				if err != nil {
-					s.queue.FailJob(job.ID, err)
-					return
-				}
-				if s.audioStore != nil {
-					s.audioStore.Write(job.ID, buf.Bytes())
-				}
-				s.queue.CompleteJob(job.ID, provider.SpeechResult{
-					Audio:       buf.Bytes(),
-					ContentType: "audio/pcm",
-					ProviderID:  p.ID(),
-					Model:       p.ID(),
-					Voice:       req.Voice,
-					Format:      "pcm",
-				})
-			}()
-			writeJSON(w, http.StatusAccepted, s.jobStatusBody(job.ID))
+			if _, lifecycleManaged := p.(provider.Lifecycle); !lifecycleManaged {
+				job := s.queue.NewRunningJob(p.ID(), req)
+				go func() {
+					var buf bytes.Buffer
+					cw := &chunkCounter{w: &buf, jobID: job.ID, queue: s.queue}
+					err := streamer.SynthesizeStream(context.Background(), req, func(meta provider.StreamMeta) {}, cw)
+					if err != nil {
+						s.queue.FailJob(job.ID, err)
+						return
+					}
+					if s.audioStore != nil {
+						s.audioStore.Write(job.ID, buf.Bytes())
+					}
+					s.queue.CompleteJob(job.ID, provider.SpeechResult{
+						Audio:       buf.Bytes(),
+						ContentType: "audio/pcm",
+						ProviderID:  p.ID(),
+						Model:       p.ID(),
+						Voice:       req.Voice,
+						Format:      "pcm",
+					})
+				}()
+				writeJSON(w, http.StatusAccepted, s.jobStatusBody(job.ID))
+				return
+			}
+		}
+		// Lifecycle-managed streamers use the buffered queue path below so
+		// warm-up and exclusive-resource scheduling remain centralized.
+		if _, lifecycleManaged := p.(provider.Lifecycle); !lifecycleManaged {
+			writeError(w, http.StatusBadRequest, errors.New("streaming not supported by this provider"))
 			return
 		}
-		writeError(w, http.StatusBadRequest, errors.New("streaming not supported by this provider"))
-		return
 	}
 
 	job, err := s.queue.Submit(p.ID(), req)
@@ -514,6 +699,10 @@ func (s *Server) decodeAndRoute(w http.ResponseWriter, r *http.Request) (provide
 	p, ok := s.providerFor(req.Model, req.Language)
 	if !ok {
 		writeError(w, http.StatusBadRequest, errors.New("unknown audio model"))
+		return provider.SpeechRequest{}, nil, false
+	}
+	if err := s.resolveVoice(r.Context(), p, &req); err != nil {
+		writeProviderError(w, err)
 		return provider.SpeechRequest{}, nil, false
 	}
 	return req, p, true
@@ -652,6 +841,50 @@ func (s *Server) validateSpeech(req provider.SpeechRequest) error {
 	return nil
 }
 
+// resolveVoice gives the API a provider-independent voice contract. An empty
+// voice is normalized to auto; an explicit voice must be present in the
+// provider's language-filtered catalog. Providers still own the actual auto
+// default (for example Supertonic's M1 or eSpeak's language voice).
+func (s *Server) resolveVoice(ctx context.Context, p provider.Provider, req *provider.SpeechRequest) error {
+	req.Language = requestLanguage(req.Language)
+	if req.Language == "auto" && !supportsAutoLanguage(p) {
+		return fmt.Errorf("%w: provider %q does not support language auto", provider.ErrInvalidRequest, p.ID())
+	}
+	voice := strings.TrimSpace(req.Voice)
+	if voice == "" {
+		voice = "auto"
+	}
+	req.Voice = voice
+
+	voices, err := p.Voices(ctx, req.Language)
+	if err != nil {
+		return err
+	}
+	if len(voices) == 0 {
+		if req.Language != "" {
+			return fmt.Errorf("%w: language %q is not supported by provider %q", provider.ErrInvalidRequest, req.Language, p.ID())
+		}
+		return fmt.Errorf("%w: provider %q has no available voices", provider.ErrInvalidRequest, p.ID())
+	}
+	if strings.EqualFold(voice, "auto") {
+		req.Voice = "auto"
+		return nil
+	}
+	for _, candidate := range voices {
+		if strings.EqualFold(strings.TrimSpace(candidate.Voice), voice) {
+			// Preserve the provider's canonical spelling (Supertonic uses M1/F1).
+			req.Voice = candidate.Voice
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: voice %q is not available for provider %q and language %q", provider.ErrInvalidRequest, voice, p.ID(), req.Language)
+}
+
+func supportsAutoLanguage(p provider.Provider) bool {
+	autoProvider, ok := p.(provider.AutoLanguageProvider)
+	return ok && autoProvider.SupportsAutoLanguage()
+}
+
 // languageProviders routes requests to a specific provider by language when
 // no model is given, for providers that only serve one language (e.g.
 // OmniVoice serves Greek). Keyed by normalized BCP-47 language.
@@ -678,6 +911,13 @@ func (s *Server) providerFor(model, language string) (provider.Provider, bool) {
 func normalizeLanguage(language string) string {
 	language = strings.ToLower(strings.TrimSpace(language))
 	return strings.ReplaceAll(language, "_", "-")
+}
+
+func requestLanguage(language string) string {
+	if language = normalizeLanguage(language); language == "" {
+		return "auto"
+	}
+	return language
 }
 
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {

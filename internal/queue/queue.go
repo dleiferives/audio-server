@@ -5,11 +5,13 @@
 package queue
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -51,7 +53,15 @@ type Job struct {
 	// streaming synthesis. Closed when the stream ends.
 	StreamBus chan []byte
 
-	done chan struct{}
+	done   chan struct{}
+	stream *streamRequest
+}
+
+type streamRequest struct {
+	ctx      context.Context
+	streamer provider.Streamer
+	onHeader func(provider.StreamMeta)
+	writer   io.Writer
 }
 
 type Config struct {
@@ -69,6 +79,13 @@ type Config struct {
 	// JobTTL is how long finished jobs are retained before being swept from
 	// memory. <= 0 uses defaultJobTTL.
 	JobTTL time.Duration
+	// ResourceGroups assigns providers to shared exclusive resources. Jobs in
+	// the same group never synthesize concurrently across providers. Providers
+	// may still use their configured worker count concurrently with themselves.
+	ResourceGroups map[string]string
+	// ResourceSwitchDelay is the quiet period after one provider in a resource
+	// group becomes idle before another provider may take the resource.
+	ResourceSwitchDelay map[string]time.Duration
 	// Now is injectable for tests; defaults to time.Now.
 	Now func() time.Time
 }
@@ -86,10 +103,19 @@ type Manager struct {
 	// lifecycleMu serializes Warm/Idle calls per provider so a timer-driven
 	// Idle can never run concurrently with a worker-driven Warm.
 	lifecycleMu map[string]*sync.Mutex
+	resourceFor map[string]string
+	resources   map[string]*resourceState
 
 	synthesizeTimeout time.Duration
 	jobTTL            time.Duration
 	now               func() time.Time
+}
+
+type resourceState struct {
+	activeProvider string
+	activeJobs     int
+	idleSince      time.Time
+	switchDelay    time.Duration
 }
 
 func NewManager(cfg Config) *Manager {
@@ -112,9 +138,20 @@ func NewManager(cfg Config) *Manager {
 		idleDelay:         make(map[string]time.Duration, len(cfg.Providers)),
 		idleTimers:        make(map[string]*time.Timer, len(cfg.Providers)),
 		lifecycleMu:       make(map[string]*sync.Mutex, len(cfg.Providers)),
+		resourceFor:       make(map[string]string, len(cfg.ResourceGroups)),
+		resources:         make(map[string]*resourceState),
 		synthesizeTimeout: cfg.SynthesizeTimeout,
 		jobTTL:            jobTTL,
 		now:               now,
+	}
+	for providerID, group := range cfg.ResourceGroups {
+		if _, ok := m.providers[providerID]; !ok || group == "" {
+			continue
+		}
+		m.resourceFor[providerID] = group
+		if _, ok := m.resources[group]; !ok {
+			m.resources[group] = &resourceState{switchDelay: cfg.ResourceSwitchDelay[group]}
+		}
 	}
 
 	for id := range cfg.Providers {
@@ -157,6 +194,45 @@ func (m *Manager) Submit(providerID string, req provider.SpeechRequest) (*Job, e
 	cond := m.conds[providerID]
 	m.mu.Unlock()
 
+	cond.Broadcast()
+	return job, nil
+}
+
+// SubmitStream queues a streaming synthesis request. Unlike direct streaming
+// for stateless providers, this path waits for provider lifecycle warm-up and
+// shared-resource scheduling before it starts writing response bytes.
+func (m *Manager) SubmitStream(providerID string, req provider.SpeechRequest, ctx context.Context, streamer provider.Streamer, onSubmit func(string), onHeader func(provider.StreamMeta), w io.Writer) (*Job, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.mu.Lock()
+	if _, ok := m.providers[providerID]; !ok {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("%w: unknown provider %q", provider.ErrInvalidRequest, providerID)
+	}
+	job := &Job{
+		ID:         newID(),
+		ProviderID: providerID,
+		Request:    req,
+		Status:     StatusQueued,
+		CreatedAt:  m.now(),
+		done:       make(chan struct{}),
+		stream: &streamRequest{
+			ctx:      ctx,
+			streamer: streamer,
+			onHeader: onHeader,
+			writer:   w,
+		},
+	}
+	m.jobs[job.ID] = job
+	m.queues[providerID] = append(m.queues[providerID], job)
+	m.cancelIdleTimerLocked(providerID)
+	cond := m.conds[providerID]
+	m.mu.Unlock()
+
+	if onSubmit != nil {
+		onSubmit(job.ID)
+	}
 	cond.Broadcast()
 	return job, nil
 }
@@ -296,21 +372,35 @@ func (m *Manager) worker(providerID string) {
 }
 
 func (m *Manager) dequeue(providerID string) *Job {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for len(m.queues[providerID]) == 0 {
-		m.conds[providerID].Wait()
+	for {
+		m.mu.Lock()
+		for len(m.queues[providerID]) == 0 {
+			m.conds[providerID].Wait()
+		}
+		m.mu.Unlock()
+
+		m.acquireResource(providerID)
+
+		m.mu.Lock()
+		if len(m.queues[providerID]) == 0 {
+			m.mu.Unlock()
+			m.releaseResource(providerID)
+			continue
+		}
+		q := m.queues[providerID]
+		job := q[0]
+		m.queues[providerID] = q[1:]
+		m.active[providerID]++
+		job.Status = StatusRunning
+		job.StartedAt = m.now()
+		m.mu.Unlock()
+		return job
 	}
-	q := m.queues[providerID]
-	job := q[0]
-	m.queues[providerID] = q[1:]
-	m.active[providerID]++
-	job.Status = StatusRunning
-	job.StartedAt = m.now()
-	return job
 }
 
 func (m *Manager) run(providerID string, job *Job) {
+	defer m.releaseResource(providerID)
+
 	m.mu.Lock()
 	p := m.providers[providerID]
 	lc, hasLifecycle := p.(provider.Lifecycle)
@@ -320,17 +410,66 @@ func (m *Manager) run(providerID string, job *Job) {
 	if needWarm {
 		lifecycleMu := m.lifecycleMu[providerID]
 		lifecycleMu.Lock()
-		ctx, cancel := context.WithTimeout(context.Background(), defaultLifecycleTimeout)
-		err := lc.Warm(ctx)
-		cancel()
-		lifecycleMu.Unlock()
+		m.mu.Lock()
+		needWarm = !m.warm[providerID]
+		m.mu.Unlock()
+		if !needWarm {
+			lifecycleMu.Unlock()
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), defaultLifecycleTimeout)
+			err := lc.Warm(ctx)
+			cancel()
+			lifecycleMu.Unlock()
+			if err != nil {
+				m.finish(providerID, job, provider.SpeechResult{}, fmt.Errorf("model warm-up failed: %w", err))
+				return
+			}
+			m.mu.Lock()
+			m.warm[providerID] = true
+			m.mu.Unlock()
+		}
+	}
+
+	if job.stream != nil {
+		ctx := job.stream.ctx
+		var cancel context.CancelFunc
+		if m.synthesizeTimeout > 0 {
+			ctx, cancel = context.WithTimeout(ctx, m.synthesizeTimeout)
+			defer cancel()
+		}
+
+		var audio bytes.Buffer
+		meta := provider.StreamMeta{
+			ProviderID:  providerID,
+			Model:       providerID,
+			Format:      "pcm",
+			ContentType: "audio/pcm",
+		}
+		onHeader := func(streamMeta provider.StreamMeta) {
+			meta = streamMeta
+			if job.stream.onHeader != nil {
+				job.stream.onHeader(streamMeta)
+			}
+		}
+		writer := &streamWriter{
+			manager: m,
+			jobID:   job.ID,
+			writer:  io.MultiWriter(job.stream.writer, &audio),
+		}
+		err := job.stream.streamer.SynthesizeStream(ctx, job.Request, onHeader, writer)
 		if err != nil {
-			m.finish(providerID, job, provider.SpeechResult{}, fmt.Errorf("model warm-up failed: %w", err))
+			m.finish(providerID, job, provider.SpeechResult{}, err)
 			return
 		}
-		m.mu.Lock()
-		m.warm[providerID] = true
-		m.mu.Unlock()
+		m.finish(providerID, job, provider.SpeechResult{
+			Audio:       audio.Bytes(),
+			ContentType: meta.ContentType,
+			ProviderID:  meta.ProviderID,
+			Model:       meta.Model,
+			Voice:       meta.Voice,
+			Format:      meta.Format,
+		}, nil)
+		return
 	}
 
 	ctx := context.Background()
@@ -341,6 +480,78 @@ func (m *Manager) run(providerID string, job *Job) {
 	}
 	result, err := p.Synthesize(ctx, job.Request)
 	m.finish(providerID, job, result, err)
+}
+
+type streamWriter struct {
+	manager *Manager
+	jobID   string
+	writer  io.Writer
+}
+
+func (w *streamWriter) Write(p []byte) (int, error) {
+	w.manager.BumpChunk(w.jobID, p)
+	return w.writer.Write(p)
+}
+
+func (m *Manager) acquireResource(providerID string) {
+	group := m.resourceFor[providerID]
+	if group == "" {
+		return
+	}
+	for {
+		m.mu.Lock()
+		state := m.resources[group]
+		// The resource is exclusive between providers, but a provider may use
+		// more than one worker when its own configuration allows it.
+		available := state.activeJobs == 0 || state.activeProvider == providerID
+		if available && state.activeProvider != "" && state.activeProvider != providerID {
+			// Do not switch away from a provider that already has more work
+			// waiting. Its worker will reacquire the same resource immediately.
+			available = len(m.queues[state.activeProvider]) == 0
+		}
+		if available && state.activeProvider != "" && state.activeProvider != providerID && state.switchDelay > 0 {
+			available = !state.idleSince.IsZero() && m.now().Sub(state.idleSince) >= state.switchDelay
+		}
+		if available {
+			if state.activeProvider != "" && state.activeProvider != providerID {
+				// An exclusive lifecycle start will stop the previous provider.
+				// Its warm bit must not survive that handoff.
+				m.warm[state.activeProvider] = false
+				m.warm[providerID] = false
+			}
+			state.activeProvider = providerID
+			state.activeJobs++
+			state.idleSince = time.Time{}
+			m.mu.Unlock()
+			return
+		}
+		wait := 10 * time.Millisecond
+		if state.activeJobs == 0 && state.activeProvider != "" && state.activeProvider != providerID && state.switchDelay > 0 && !state.idleSince.IsZero() {
+			remaining := state.switchDelay - m.now().Sub(state.idleSince)
+			if remaining > 0 && remaining < wait {
+				wait = remaining
+			}
+		}
+		m.mu.Unlock()
+		time.Sleep(wait)
+	}
+}
+
+func (m *Manager) releaseResource(providerID string) {
+	group := m.resourceFor[providerID]
+	if group == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state := m.resources[group]
+	if state.activeProvider != providerID || state.activeJobs == 0 {
+		return
+	}
+	state.activeJobs--
+	if state.activeJobs == 0 {
+		state.idleSince = m.now()
+	}
 }
 
 func (m *Manager) finish(providerID string, job *Job, result provider.SpeechResult, err error) {

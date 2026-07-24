@@ -45,9 +45,10 @@ func main() {
 	supertonicAddr := flag.String("supertonic-addr", env("AUDIO_SUPERTONIC_ADDR", ""), "Supertonic sidecar base URL (e.g. http://127.0.0.1:8022); disabled when blank")
 	audiocppBin := flag.String("audiocpp-bin", env("AUDIO_AUDIOCPP_BIN", "audio.cpp/build/linux-cuda-release/bin/audiocpp_server"), "path to audiocpp_server binary")
 	audiocppIdle := flag.Int("audiocpp-idle-unload-seconds", envInt("AUDIO_AUDIOCPP_IDLE_UNLOAD", 600), "seconds before unloading idle audiocpp_server instances")
+	resourceSwitchDelaySeconds := flag.Int("resource-switch-delay-seconds", envInt("AUDIO_RESOURCE_SWITCH_DELAY_SECONDS", 1), "quiet seconds before switching the shared audio.cpp GPU between providers")
 	kokoroAddr := flag.String("kokoro-addr", env("AUDIO_KOKORO_ADDR", ""), "Kokoro TTS sidecar base URL (e.g. http://127.0.0.1:8021); disabled when blank")
 	kokoroConcurrency := flag.Int("kokoro-concurrency", envInt("AUDIO_KOKORO_CONCURRENCY", 1), "concurrent Kokoro workers")
-	_ = flag.Int("kokoro-idle-unload-seconds", envInt("AUDIO_KOKORO_IDLE_UNLOAD_SECONDS", 30), "seconds an empty Kokoro queue waits before the model is unloaded")
+	kokoroIdle := flag.Int("kokoro-idle-unload-seconds", envInt("AUDIO_KOKORO_IDLE_UNLOAD_SECONDS", 30), "seconds an empty Kokoro queue waits before the model is unloaded")
 	_ = flag.Int("model-idle-unload-seconds", envInt("AUDIO_MODEL_IDLE_UNLOAD_SECONDS", 600), "seconds before unloading idle GPU models (default 10 min)")
 	fasterWhisperAddr := flag.String("faster-whisper-addr", env("AUDIO_FASTERWHISPER_ADDR", ""), "faster-whisper sidecar base URL (e.g. http://127.0.0.1:8030); disabled when blank")
 	webDir := flag.String("web-dir", env("AUDIO_WEB_DIR", ""), "optional path to static web frontend directory")
@@ -93,12 +94,32 @@ func main() {
 	for _, p := range providers {
 		providerMap[p.ID()] = p
 	}
+	resourceGroups := map[string]string{}
+	resourceSwitchDelay := map[string]time.Duration{}
+	idleUnload := map[string]time.Duration{}
+	if gpuLifecycle != nil {
+		const gpuGroup = "audiocpp-gpu"
+		resourceGroups["omnivoice"] = gpuGroup
+		resourceGroups["supertonic"] = gpuGroup
+		if *resourceSwitchDelaySeconds > 0 {
+			resourceSwitchDelay[gpuGroup] = time.Duration(*resourceSwitchDelaySeconds) * time.Second
+		}
+		idleDelay := time.Duration(*audiocppIdle) * time.Second
+		idleUnload["omnivoice"] = idleDelay
+		idleUnload["supertonic"] = idleDelay
+	}
+	if strings.TrimSpace(*kokoroAddr) != "" && *kokoroIdle > 0 {
+		idleUnload["kokoro"] = time.Duration(*kokoroIdle) * time.Second
+	}
 
 	requestTimeout := time.Duration(*requestTimeoutSeconds) * time.Second
 	jobQueue := queue.NewManager(queue.Config{
-		Providers:         providerMap,
-		Workers:           workers,
-		SynthesizeTimeout: requestTimeout,
+		Providers:           providerMap,
+		Workers:             workers,
+		IdleUnload:          idleUnload,
+		ResourceGroups:      resourceGroups,
+		ResourceSwitchDelay: resourceSwitchDelay,
+		SynthesizeTimeout:   requestTimeout,
 	})
 
 	var sttProviders []sttprovider.Provider

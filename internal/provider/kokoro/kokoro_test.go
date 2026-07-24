@@ -97,6 +97,19 @@ func TestVoicesFiltersByLanguage(t *testing.T) {
 	}
 }
 
+func TestVoicesFallsBackToCatalogWhenSidecarIsCold(t *testing.T) {
+	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("connection refused")
+	}}, nil)
+	voices, err := p.Voices(context.Background(), "en-gb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(voices) != 4 || voices[0].Language != "en-gb" {
+		t.Fatalf("unexpected cold catalog: %+v", voices)
+	}
+}
+
 func TestSynthesizeSendsRequestAndReturnsWAV(t *testing.T) {
 	var gotBody synthesizeRequest
 	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {

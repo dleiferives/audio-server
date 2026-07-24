@@ -18,6 +18,7 @@ h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 20px; }
   background: #1a1a1a; border: 1px solid #333;
 }
 .badge.ok { border-color: #2e7d32; color: #66bb6a; }
+.badge.cold { border-color: #8a6d1d; color: #e2bd5b; }
 .badge.down { border-color: #c62828; color: #ef5350; }
 section {
   background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px;
@@ -86,7 +87,7 @@ audio { width: 100%; margin-top: 10px; }
     <div>
       <label>Language</label>
       <select id="tts-language">
-        <option value="">Auto</option>
+        <option value="auto">Auto</option>
       </select>
     </div>
     <div>
@@ -127,17 +128,18 @@ audio { width: 100%; margin-top: 10px; }
 const API = '';
 
 async function init() {
-  const [health, voices] = await Promise.all([
+  const [health, capabilities] = await Promise.all([
     fetch(API + '/healthz').then(r => r.json()).catch(() => null),
-    fetch(API + '/v1/audio/voices').then(r => r.json()).catch(() => null),
+    fetch(API + '/v1/audio/capabilities').then(r => r.json()).catch(() => null),
   ]);
 
   renderStatus(health);
-  renderProviders(health, voices);
+  renderProviders(health);
+  renderLanguages(capabilities);
   renderVoices();
-  renderLanguages();
 
   ttsProviderEl.onchange = () => { renderVoices(); renderProviderOpts(); };
+  ttsLanguageEl.onchange = renderVoices;
   document.getElementById('tts-speak').onclick = doTts;
   document.getElementById('stt-record').onclick = toggleRecord;
   document.getElementById('stt-upload-trigger').onclick = () => sttFileEl.click();
@@ -152,11 +154,11 @@ function renderStatus(health) {
   }
   const providers = health.providers || {};
   el.innerHTML = Object.entries(providers).map(([name, state]) =>
-    `<span class="badge ${state === 'ok' ? 'ok' : 'down'}">${name}: ${state}</span>`
+    `<span class="badge ${state === 'ok' ? 'ok' : state === 'cold' ? 'cold' : 'down'}">${name}: ${state}</span>`
   ).join('');
 }
 
-function renderProviders(health, voicesData) {
+function renderProviders(health) {
   const sel = document.getElementById('tts-provider');
   sel.innerHTML = '';
   const providers = health?.providers || {};
@@ -165,7 +167,7 @@ function renderProviders(health, voicesData) {
     if (id === 'faster-whisper') continue;
     const opt = document.createElement('option');
     opt.value = id;
-    opt.textContent = id + (state === 'ok' ? '' : ' (down)');
+    opt.textContent = id + (state === 'ok' ? '' : state === 'cold' ? ' (cold; starts on request)' : ' (down)');
     sel.appendChild(opt);
   }
 }
@@ -173,9 +175,12 @@ function renderProviders(health, voicesData) {
 async function renderVoices() {
   const provider = ttsProviderEl.value;
   const sel = document.getElementById('tts-voice');
-  sel.innerHTML = '';
+  sel.innerHTML = '<option value="auto">Auto (server chooses)</option>';
+  if (!provider) return;
   try {
-    const r = await fetch(API + '/v1/audio/voices?provider=' + encodeURIComponent(provider));
+    const params = new URLSearchParams({ provider });
+    if (ttsLanguageEl.value) params.set('language', ttsLanguageEl.value);
+    const r = await fetch(API + '/v1/audio/voices?' + params.toString());
     const data = await r.json();
     for (const v of (data.voices || [])) {
       const opt = document.createElement('option');
@@ -184,16 +189,16 @@ async function renderVoices() {
       sel.appendChild(opt);
     }
   } catch (e) {
-    const opt = document.createElement('option');
-    opt.value = '';
-    opt.textContent = '(none)';
-    sel.appendChild(opt);
+    if (sel.options.length === 1) sel.options[0].textContent = 'Auto (server chooses; catalog unavailable)';
   }
 }
 
-function renderLanguages() {
+function renderLanguages(capabilities) {
   const sel = document.getElementById('tts-language');
-  for (const lang of LANGUAGES) {
+  const languages = Array.isArray(capabilities?.languages) && capabilities.languages.length
+    ? capabilities.languages
+    : LANGUAGES;
+  for (const lang of languages) {
     const opt = document.createElement('option');
     opt.value = lang;
     opt.textContent = lang;

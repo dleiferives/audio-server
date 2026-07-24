@@ -11,11 +11,14 @@ import (
 )
 
 type fakeProvider struct {
-	id       string
-	mu       sync.Mutex
-	calls    []string
-	delay    time.Duration
-	failWith error
+	id        string
+	mu        sync.Mutex
+	calls     []string
+	started   time.Time
+	active    int
+	maxActive int
+	delay     time.Duration
+	failWith  error
 }
 
 func (f *fakeProvider) ID() string                                               { return f.id }
@@ -25,7 +28,17 @@ func (f *fakeProvider) Voices(context.Context, string) ([]provider.Voice, error)
 func (f *fakeProvider) Synthesize(ctx context.Context, req provider.SpeechRequest) (provider.SpeechResult, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, req.Input)
+	f.started = time.Now()
+	f.active++
+	if f.active > f.maxActive {
+		f.maxActive = f.active
+	}
 	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.active--
+		f.mu.Unlock()
+	}()
 	if f.delay > 0 {
 		time.Sleep(f.delay)
 	}
@@ -33,6 +46,12 @@ func (f *fakeProvider) Synthesize(ctx context.Context, req provider.SpeechReques
 		return provider.SpeechResult{}, f.failWith
 	}
 	return provider.SpeechResult{Audio: []byte(req.Input), ProviderID: f.id}, nil
+}
+
+func (f *fakeProvider) startTime() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.started
 }
 
 func (f *fakeProvider) callCount() int {
@@ -45,6 +64,12 @@ func (f *fakeProvider) callOrder() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.calls...)
+}
+
+func (f *fakeProvider) maxConcurrent() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.maxActive
 }
 
 type fakeLifecycle struct {
@@ -223,6 +248,66 @@ func TestLifecycleWarmFailureFailsJobWithoutSynthesizing(t *testing.T) {
 	}
 	if base.callCount() != 0 {
 		t.Fatalf("expected Synthesize not to be called when Warm fails")
+	}
+}
+
+func TestExclusiveResourceWaitsForPreviousProviderAndHandoffDelay(t *testing.T) {
+	firstBase := &fakeProvider{id: "first", delay: 40 * time.Millisecond}
+	secondBase := &fakeProvider{id: "second"}
+	first := &fakeLifecycle{fakeProvider: firstBase}
+	second := &fakeLifecycle{fakeProvider: secondBase}
+	m := NewManager(Config{
+		Providers: map[string]provider.Provider{"first": first, "second": second},
+		Workers:   map[string]int{"first": 1, "second": 1},
+		ResourceGroups: map[string]string{
+			"first":  "gpu",
+			"second": "gpu",
+		},
+		ResourceSwitchDelay: map[string]time.Duration{"gpu": 30 * time.Millisecond},
+	})
+
+	job1, _ := m.Submit("first", provider.SpeechRequest{Input: "first"})
+	waitFor(t, time.Second, func() bool { return firstBase.callCount() == 1 })
+	job2, _ := m.Submit("second", provider.SpeechRequest{Input: "second"})
+	time.Sleep(10 * time.Millisecond)
+	if secondBase.callCount() != 0 {
+		t.Fatal("second provider started while first provider was still active")
+	}
+
+	firstResult, err := m.Wait(context.Background(), job1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Wait(context.Background(), job2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if firstResult.Status != StatusSucceeded {
+		t.Fatalf("first job status = %s", firstResult.Status)
+	}
+	if started := secondBase.startTime(); started.Sub(firstResult.FinishedAt) < 25*time.Millisecond {
+		t.Fatalf("second provider started too soon after first finished: %s", started.Sub(firstResult.FinishedAt))
+	}
+}
+
+func TestExclusiveResourceAllowsSameProviderConcurrency(t *testing.T) {
+	p := &fakeProvider{id: "gpu", delay: 40 * time.Millisecond}
+	m := NewManager(Config{
+		Providers: map[string]provider.Provider{"gpu": p},
+		Workers:   map[string]int{"gpu": 2},
+		ResourceGroups: map[string]string{
+			"gpu": "shared-gpu",
+		},
+	})
+	job1, _ := m.Submit("gpu", provider.SpeechRequest{Input: "a"})
+	job2, _ := m.Submit("gpu", provider.SpeechRequest{Input: "b"})
+	if _, err := m.Wait(context.Background(), job1.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Wait(context.Background(), job2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.maxConcurrent(); got != 2 {
+		t.Fatalf("max concurrent syntheses = %d, want 2", got)
 	}
 }
 

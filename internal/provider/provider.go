@@ -48,6 +48,21 @@ type Provider interface {
 	Synthesize(ctx context.Context, req SpeechRequest) (SpeechResult, error)
 }
 
+// LanguageCatalog is an optional provider capability used by the discovery
+// endpoint. Voices(ctx, language) remains the source of truth for validating
+// a request; Languages reports the provider's complete language catalog when
+// it can do so without a language filter.
+type LanguageCatalog interface {
+	Languages(ctx context.Context) ([]string, error)
+}
+
+// AutoLanguageProvider marks providers that accept the API's special
+// language value "auto". The value means provider-defined automatic/default
+// language handling; it is distinct from selecting a concrete BCP-47 tag.
+type AutoLanguageProvider interface {
+	SupportsAutoLanguage() bool
+}
+
 // Lifecycle is an optional interface for providers that manage an expensive
 // resource (e.g. a GPU-resident model). The queue manager calls Warm before
 // dispatching the first job to a cold provider, and Idle after the

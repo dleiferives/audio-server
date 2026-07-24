@@ -23,6 +23,11 @@ const (
 	defaultSpeed = 1.0
 )
 
+var supportedLanguages = []string{
+	"en", "ko", "ja", "ar", "bg", "cs", "da", "de", "el", "es", "et", "fi", "fr", "hi", "hr", "hu",
+	"id", "it", "lt", "lv", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "tr", "uk", "vi",
+}
+
 type HTTPClient interface {
 	Do(req *http.Request) (*http.Response, error)
 }
@@ -39,8 +44,9 @@ type Provider struct {
 }
 
 var (
-	_ provider.Provider = Provider{}
-	_ provider.Streamer = Provider{}
+	_ provider.Provider  = Provider{}
+	_ provider.Streamer  = Provider{}
+	_ provider.Lifecycle = Provider{}
 )
 
 func New(baseURL string, client HTTPClient, enc Encoder) Provider {
@@ -54,6 +60,8 @@ func New(baseURL string, client HTTPClient, enc Encoder) Provider {
 func (p Provider) ID() string {
 	return id
 }
+
+func (p Provider) SupportsAutoLanguage() bool { return true }
 
 func (p Provider) Health(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.BaseURL+"/health", nil)
@@ -71,6 +79,23 @@ func (p Provider) Health(ctx context.Context) error {
 	return nil
 }
 
+// Warm starts the managed sidecar, when configured, before a queued job is
+// marked ready to synthesize. With no process manager this simply verifies
+// that the configured sidecar is reachable.
+func (p Provider) Warm(ctx context.Context) error {
+	if p.StartFunc != nil {
+		if err := p.StartFunc(); err != nil {
+			return fmt.Errorf("%w: lifecycle start failed: %v", provider.ErrUnavailable, err)
+		}
+	}
+	return p.Health(ctx)
+}
+
+// Idle is intentionally a no-op for the native audio.cpp sidecar. The shared
+// lifecycle manager stops the process when another exclusive GPU provider is
+// selected; the sidecar itself also lazy-loads on the next synthesis.
+func (p Provider) Idle(context.Context) error { return nil }
+
 var presetVoices = []provider.Voice{
 	{Provider: id, Voice: "M1", Language: "en", Name: "Male 1"},
 	{Provider: id, Voice: "M2", Language: "en", Name: "Male 2"},
@@ -87,6 +112,9 @@ var presetVoices = []provider.Voice{
 func (p Provider) Voices(ctx context.Context, language string) ([]provider.Voice, error) {
 	voices := make([]provider.Voice, 0, len(presetVoices))
 	language = normalizeLanguage(language)
+	if language != "" && !supportsLanguage(language) {
+		return voices, nil
+	}
 	for _, v := range presetVoices {
 		if language != "" && language != "en" {
 			v.Language = language
@@ -94,6 +122,28 @@ func (p Provider) Voices(ctx context.Context, language string) ([]provider.Voice
 		voices = append(voices, v)
 	}
 	return voices, nil
+}
+
+func (p Provider) Languages(context.Context) ([]string, error) {
+	languages := append([]string{"auto"}, supportedLanguages...)
+	return languages, nil
+}
+
+func supportsLanguage(language string) bool {
+	language = normalizeLanguage(language)
+	if language == "auto" {
+		return true
+	}
+	base := language
+	if i := strings.IndexByte(base, '-'); i >= 0 {
+		base = base[:i]
+	}
+	for _, supported := range supportedLanguages {
+		if language == supported || base == supported {
+			return true
+		}
+	}
+	return false
 }
 
 type speechRequest struct {
@@ -128,12 +178,12 @@ func (p Provider) Synthesize(ctx context.Context, req provider.SpeechRequest) (p
 	if format == "" {
 		format = "wav"
 	}
-	if format != "wav" && p.Encoder == nil {
+	if format != "wav" && format != "pcm" && p.Encoder == nil {
 		return provider.SpeechResult{}, fmt.Errorf("%w: %s", provider.ErrUnsupportedFormat, format)
 	}
 
 	language := normalizeLanguage(req.Language)
-	if language == "" {
+	if language == "" || language == "auto" {
 		language = defaultLang
 	}
 	speed := req.Speed
@@ -156,13 +206,23 @@ func (p Provider) Synthesize(ctx context.Context, req provider.SpeechRequest) (p
 		options["speed"] = req.Speed
 	}
 
+	sidecarFormat := "wav"
+	streamFormat := ""
+	if format == "pcm" {
+		// audio.cpp exposes raw PCM through its streaming endpoint even when
+		// the Go queue is using the buffered Synthesize path. This preserves
+		// PCM requests for lifecycle-managed providers.
+		sidecarFormat = "pcm"
+		streamFormat = "audio"
+	}
 	sr := speechRequest{
 		Model:          id,
 		Input:          input,
 		Voice:          voice,
 		Language:       language,
 		Speed:          speed,
-		ResponseFormat: "wav",
+		ResponseFormat: sidecarFormat,
+		StreamFormat:   streamFormat,
 		Options:        options,
 	}
 
@@ -176,6 +236,9 @@ func (p Provider) Synthesize(ctx context.Context, req provider.SpeechRequest) (p
 		return provider.SpeechResult{}, fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if format == "pcm" {
+		httpReq.Header.Set("Accept", "audio/pcm")
+	}
 
 	resp, err := p.Client.Do(httpReq)
 	if err != nil {
@@ -198,6 +261,16 @@ func (p Provider) Synthesize(ctx context.Context, req provider.SpeechRequest) (p
 			Model:       id,
 			Voice:       voice,
 			Format:      "wav",
+		}, nil
+	}
+	if format == "pcm" {
+		return provider.SpeechResult{
+			Audio:       respBody,
+			ContentType: "audio/pcm",
+			ProviderID:  id,
+			Model:       id,
+			Voice:       voice,
+			Format:      "pcm",
 		}, nil
 	}
 
@@ -233,7 +306,7 @@ func (p Provider) SynthesizeStream(ctx context.Context, req provider.SpeechReque
 	}
 
 	language := normalizeLanguage(req.Language)
-	if language == "" {
+	if language == "" || language == "auto" {
 		language = defaultLang
 	}
 	voice := req.Voice

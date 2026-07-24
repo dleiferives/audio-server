@@ -13,7 +13,7 @@ type Provider interface {
 
 Providers are registered in `cmd/audio/main.go` and routed by the `model` field in speech requests. OpenAI model aliases (`tts-1`, `tts-1-hd`, `gpt-4o-mini-tts`, `auto`) all resolve to the configured default provider.
 
-Every request runs through `internal/queue`, which gives each provider its own FIFO queue and worker pool (see `docs/architecture.md`). `Synthesize` itself is unchanged by this — a provider still just does one request in, one result out.
+Every buffered request runs through `internal/queue`, which gives each provider its own FIFO queue and worker pool (see `docs/architecture.md`). Providers that share an exclusive resource are coordinated by the same manager. `Synthesize` itself is unchanged by this — a provider still just does one request in, one result out.
 
 ### Optional: `provider.Lifecycle`
 
@@ -34,7 +34,7 @@ type Streamer interface {
 }
 ```
 
-Providers that can produce audio progressively (rather than only a complete buffer) can implement this to support `"stream": true` on `POST /v1/audio/speech`. Unlike `Synthesize`, this bypasses `internal/queue` entirely — streaming is tied to one live HTTP connection, not a poll-able job, so it's gated by its own small per-provider concurrency limit (`Config.StreamWorkers` in `internal/server`) instead. `SynthesizeStream` must call `onHeader` exactly once, before writing any bytes to `w` — voice/format are resolved synchronously from the request, so this doesn't require waiting on the actual audio. `espeak-ng` implements this; `omnivoice` doesn't (a diffusion model producing one complete waveform has no natural incremental output today) — a `stream: true` request routed to a non-streaming provider silently falls back to the buffered response.
+Providers that can produce audio progressively (rather than only a complete buffer) can implement this to support `"stream": true` on `POST /v1/audio/speech`. Non-lifecycle providers bypass `internal/queue` for this path and use the per-provider `Config.StreamWorkers` limit. Lifecycle-managed streamers are queued first, then stream through the worker after warm-up/resource scheduling. `SynthesizeStream` must call `onHeader` exactly once, before writing any bytes to `w`.
 
 ## espeak-ng
 
@@ -48,9 +48,18 @@ The espeak provider shells out to `espeak-ng --stdin --stdout` to generate WAV, 
 
 ### Voice selection
 
-1. Use `voice` from the request if set and not `"auto"`
-2. Use `language` from the request (normalized to BCP-47, e.g. `en-us`)
-3. Fall back to `AUDIO_ESPEAK_DEFAULT_VOICE` (default: `en`)
+The audio-server validates an explicit voice against `Voices(ctx, language)`
+before enqueueing synthesis. This keeps language eligibility in the provider
+instead of in each client. An omitted voice is normalized to `"auto"`; the
+provider then chooses its own valid default for the request language. For
+eSpeak, that means the language voice when one is supplied, then the configured
+`AUDIO_ESPEAK_DEFAULT_VOICE` (default: `en`).
+
+Providers may advertise `auto` as a language. The server uses `language:
+"auto"` when the request omits language, and only offers that choice for
+providers that declare automatic/default language handling. Supertonic's
+adapter maps `auto` to its default `en` tag because the native Supertonic
+tokenizer requires a concrete language tag.
 
 ### Speed mapping
 
@@ -85,7 +94,7 @@ The shipped implementation is `FFmpeg` (`internal/encode/ffmpeg.go`).
 **Sidecar:** `tts/omnivoice/server.py`  
 **Requires:** Python 3.10+, CUDA-enabled PyTorch, `omnivoice==0.1.5` (sidecar); nothing on the Go side beyond network access to the sidecar
 
-The OmniVoice model (`k2-fsa/OmniVoice`) handles Greek (`el`) synthesis via diffusion. It chunks long input internally and reuses the first generated voice for consistency. The sidecar only ever produces WAV; for any other `response_format` (e.g. the default `mp3`), the Go provider encodes the WAV result via the same `encode.FFmpeg` instance espeak-ng uses (`internal/provider/omnivoice.Provider.Encoder`) — this only works for the buffered path since OmniVoice never streams, which is fine since it doesn't implement `provider.Streamer`.
+The OmniVoice model (`k2-fsa/OmniVoice`) handles multilingual synthesis via diffusion. It chunks long input internally and reuses the first generated voice for consistency. The audio.cpp sidecar supports pseudo-streaming: it emits SSE `speech.audio.delta` events for generated text chunks. The Go provider decodes those events to raw PCM for `SynthesizeStream`; non-PCM buffered responses are encoded via the shared `encode.FFmpeg` instance.
 
 The Go provider is a thin HTTP client: it calls `GET /health`, `GET /voices`, `POST /synthesize`, and (via `provider.Lifecycle`) `POST /load` / `POST /unload` on the sidecar. Enable it by setting `AUDIO_OMNIVOICE_ADDR` (or `-omnivoice-addr`) to the sidecar's base URL, e.g. `http://127.0.0.1:8020`; the provider is not registered when this is blank, so the main server starts fine without the sidecar running.
 
@@ -100,12 +109,17 @@ python -m pip install omnivoice==0.1.5
 
 ### GPU model lifecycle (VRAM budget)
 
-The sidecar doesn't load the model at startup — it loads lazily, on the queue manager's first `Warm` call (or on the first direct `/synthesize` call, defensively). This matters on VRAM-constrained boxes: the model stays resident while OmniVoice jobs keep arriving, and gets unloaded (`torch.cuda.empty_cache()`) once its queue has been empty for `AUDIO_OMNIVOICE_IDLE_UNLOAD_SECONDS` (default 30s). `AUDIO_OMNIVOICE_CONCURRENCY` (default **1**) caps how many OmniVoice jobs run at once — keep this at 1 on a single GPU with limited VRAM, since the sidecar has no concept of splitting VRAM across concurrent generations. Pass `--preload` / `OMNIVOICE_PRELOAD=1` to the sidecar if you'd rather it load eagerly at startup (e.g. for a dedicated GPU box where idle-unload isn't needed).
+The sidecar doesn't load the model at startup — it loads lazily, on the queue manager's first `Warm` call (or on the first direct `/synthesize` call, defensively). This matters on VRAM-constrained boxes: the model stays resident while OmniVoice jobs keep arriving, and the native sidecar is unloaded after the queue has been empty for `AUDIO_AUDIOCPP_IDLE_UNLOAD` (default 600s). `AUDIO_OMNIVOICE_CONCURRENCY` (default **1**) caps how many OmniVoice jobs run at once — keep this at 1 on a single GPU with limited VRAM, since the sidecar has no concept of splitting VRAM across concurrent generations. Pass `--preload` / `OMNIVOICE_PRELOAD=1` to the sidecar if you'd rather it load eagerly at startup (e.g. for a dedicated GPU box where idle-unload isn't needed).
 
 ### Routing
 
 - `"model": "omnivoice"` routes directly to this provider
 - `"language": "el"` with no explicit model also routes here (see `languageProviders` in `internal/server/server.go`)
+
+OmniVoice accepts `language: "auto"` as well as concrete language tags. Its
+catalog advertises the automatic voice because the underlying model supports
+many languages rather than exposing a finite built-in voice list. The audio
+server can report and validate that catalog while the sidecar is cold.
 
 ### `provider_options`
 
@@ -143,7 +157,7 @@ Run the sidecar independently — see [`tts/kokoro/README.md`](../tts/kokoro/REA
 
 ### GPU model lifecycle (VRAM budget)
 
-Same pattern as OmniVoice: the sidecar lazily loads a single shared `KModel` (the ~82M-parameter model itself is language-independent) plus a `KPipeline` per requested language (cached, created lazily) on the queue manager's first `Warm` call. `AUDIO_KOKORO_IDLE_UNLOAD_SECONDS` (default 30s) unloads everything after the queue's been empty that long; `AUDIO_KOKORO_CONCURRENCY` (default **1**) caps concurrent Kokoro jobs. Kokoro's footprint is much smaller than OmniVoice's (well under 1GB VRAM in practice), but the two providers don't currently coordinate VRAM budget with each other — if both are configured and happen to be warm simultaneously on a tightly VRAM-constrained box, that's on you to size against your card; there's no cross-provider GPU arbitration yet.
+Same pattern as OmniVoice: the sidecar lazily loads a single shared `KModel` (the ~82M-parameter model itself is language-independent) plus a `KPipeline` per requested language (cached, created lazily) on the queue manager's first `Warm` call. Kokoro's static voice catalog remains available to clients while the sidecar is cold.
 
 ### Routing
 

@@ -5,7 +5,7 @@
 ```
 cmd/audio/main.go          — binary entry point, wires config + providers + queue
 internal/server/           — HTTP server, routing, auth
-internal/queue/             — per-provider job queue, worker pools, GPU model lifecycle
+internal/queue/             — per-provider queues, worker pools, shared-resource lifecycle
 internal/provider/         — Provider (+ optional Lifecycle) interface + shared types
 internal/provider/espeak/    — espeak-ng subprocess provider (implements Streamer)
 internal/provider/omnivoice/ — OmniVoice HTTP sidecar client provider (implements Lifecycle)
@@ -38,9 +38,9 @@ Both entry points submit to the same `queue.Manager`; `/v1/audio/speech` just al
 
 ## Queue and GPU model lifecycle
 
-`internal/queue.Manager` gives each provider ID its own FIFO queue and a fixed-size worker pool (`AUDIO_MAX_CONCURRENCY` for espeak-ng, `AUDIO_OMNIVOICE_CONCURRENCY` for OmniVoice — default 1, since a single 4GB GPU can't run concurrent diffusion jobs). A worker just pulls the next job off its provider's queue and calls the unchanged `provider.Synthesize`; because it doesn't do anything between back-to-back jobs, a queue with several pending OmniVoice requests never reloads the model between them.
+`internal/queue.Manager` gives each provider ID its own FIFO queue and a fixed-size worker pool (`AUDIO_MAX_CONCURRENCY` for espeak-ng, `AUDIO_OMNIVOICE_CONCURRENCY` for OmniVoice). Providers can also be assigned to a shared exclusive resource. OmniVoice and Supertonic share the `audiocpp-gpu` resource, so requests for one remain queued while the other is active; requests for the same provider may still use that provider's configured worker count.
 
-For providers with an expensive resource to manage, `provider.Lifecycle` (`Warm`/`Idle`) lets the manager load the model before the first job after an idle period and unload it after the queue has been empty for `AUDIO_OMNIVOICE_IDLE_UNLOAD_SECONDS`. `espeak-ng` doesn't implement it (nothing to warm); `omnivoice` does (`POST /load` / `POST /unload` on the sidecar). A per-provider mutex in the queue manager guarantees a timer-driven `Idle` and a worker-driven `Warm` never run concurrently, so the model can't be unloaded out from under an about-to-start job.
+For providers with an expensive resource to manage, `provider.Lifecycle` (`Warm`/`Idle`) lets the manager load the model before the first job after an idle period. When switching providers in the shared GPU group, the manager waits until the current provider has no active or queued work, then waits one second before warming the next provider. This gives the previous native process time to finish releasing its model before the lifecycle manager starts the next one. `espeak-ng` doesn't implement lifecycle (nothing to warm); OmniVoice and Supertonic do. A per-provider mutex guarantees a timer-driven `Idle` and a worker-driven `Warm` never run concurrently.
 
 Jobs are tracked in memory only (map keyed by job ID); finished jobs are swept after ~10 minutes. A server restart loses all queued/in-flight/recently-finished jobs — there's no persistence.
 
@@ -48,7 +48,7 @@ Jobs are tracked in memory only (map keyed by job ID); finished jobs are swept a
 
 ## Streaming
 
-`"stream": true` on `POST /v1/audio/speech` takes a deliberately different path from everything above: it bypasses `internal/queue` entirely. The queue model — poll-able jobs, detached execution, GPU lifecycle — exists for async multi-consumer work; a stream is none of those things, it's one live HTTP connection with exactly one consumer. So `server.streamSpeech` calls `provider.Streamer.SynthesizeStream` directly from the request-handling goroutine, gated by its own small per-provider semaphore (`Config.StreamWorkers`, sized the same as the provider's queue workers so total concurrent espeak-ng subprocesses stays bounded). Unlike queued jobs, a stream's context *is* `r.Context()` bounded by `AUDIO_REQUEST_TIMEOUT_SECONDS` — disconnecting the client or hitting the timeout genuinely cancels synthesis, which is correct here since nothing else is waiting on the output.
+`"stream": true` uses direct streaming for non-lifecycle providers, gated by the per-provider semaphore (`Config.StreamWorkers`). Lifecycle-managed streamers are submitted as queue jobs: the queue performs warm-up and shared-resource scheduling, then the worker invokes `SynthesizeStream` and writes chunks to the waiting HTTP response. The provider stream is tied to the live HTTP connection and is cancelled when it disconnects.
 
 Only `espeak-ng` implements `provider.Streamer` today (see `docs/providers.md`); `omnivoice` doesn't, so `stream: true` against it silently falls back to the buffered path.
 

@@ -51,6 +51,8 @@ func (p Provider) ID() string {
 	return "espeak-ng"
 }
 
+func (p Provider) SupportsAutoLanguage() bool { return true }
+
 func (p Provider) Health(ctx context.Context) error {
 	if _, err := exec.LookPath(p.path()); err != nil {
 		return fmt.Errorf("%w: %s not found", provider.ErrUnavailable, p.path())
@@ -65,7 +67,7 @@ func (p Provider) Health(ctx context.Context) error {
 
 func (p Provider) Voices(ctx context.Context, language string) ([]provider.Voice, error) {
 	args := []string{"--voices"}
-	if language = normalizeLanguage(language); language != "" {
+	if language = normalizeLanguage(language); language != "" && language != "auto" {
 		args = []string{"--voices=" + language}
 	}
 	stdout, stderr, err := p.runner()(ctx, p.path(), args, nil)
@@ -204,7 +206,7 @@ func (p Provider) chooseVoice(req provider.SpeechRequest) string {
 	if voice := strings.TrimSpace(req.Voice); voice != "" && voice != "auto" {
 		return voice
 	}
-	if language := normalizeLanguage(req.Language); language != "" {
+	if language := normalizeLanguage(req.Language); language != "" && language != "auto" {
 		return language
 	}
 	return p.defaultVoice()

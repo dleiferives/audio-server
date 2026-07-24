@@ -6,7 +6,9 @@ The server exposes an OpenAI-compatible TTS API on `http://127.0.0.1:8010` by de
 
 ### `GET /healthz`
 
-Returns provider health status. No authentication required.
+Returns provider health status. No authentication required. Lifecycle-managed
+providers may report `cold` when their sidecar is intentionally stopped; that
+is a ready-to-start state, not an outage, and does not make the endpoint fail.
 
 **Response 200**
 ```json
@@ -14,6 +16,19 @@ Returns provider health status. No authentication required.
   "status": "ok",
   "providers": {
     "espeak-ng": "ok"
+  }
+}
+```
+
+Example with an unloaded GPU provider:
+
+```json
+{
+  "status": "ok",
+  "providers": {
+    "espeak-ng": "ok",
+    "supertonic": "ok",
+    "omnivoice": "cold"
   }
 }
 ```
@@ -38,7 +53,7 @@ List available voices, optionally filtered by language.
 
 | Parameter | Description |
 |---|---|
-| `language` | BCP-47 language tag filter (e.g. `en`, `el`, `fr`) |
+| `language` | BCP-47 language tag filter (e.g. `en`, `el`, `fr`); use `auto` for the provider's automatic/default language behavior |
 | `provider` | provider ID to query (default: the default provider) |
 
 **Response 200**
@@ -58,6 +73,36 @@ List available voices, optionally filtered by language.
 
 ---
 
+### `GET /v1/audio/capabilities`
+
+Returns the complete TTS catalog exposed by this audio-server instance. The
+top-level `languages` list is the union across providers. Each provider lists
+its supported languages and canonical voice definitions. To get voices
+compatible with one selected language, call `/v1/audio/voices` with both
+`provider` and `language`.
+
+**Response 200**
+```json
+{
+  "languages": ["ar", "el", "en", "ja"],
+  "providers": [
+    {
+      "provider": "supertonic",
+      "languages": ["ar", "el", "en", "ja"],
+      "voices": [
+        {"provider": "supertonic", "voice": "M1", "language": "en", "name": "Male 1"}
+      ]
+    }
+  ]
+}
+```
+
+`voice=auto` is the provider-independent default voice value. It is not a
+provider voice; it asks a provider that supports the selected language to
+choose its default voice.
+
+---
+
 ### `POST /v1/audio/speech`
 
 Synthesize speech from text and wait for the result. Returns raw audio bytes.
@@ -65,7 +110,8 @@ Synthesize speech from text and wait for the result. Returns raw audio bytes.
 Internally this submits a job to the same per-provider queue used by
 `/v1/audio/jobs` and blocks until it finishes (bounded by
 `AUDIO_REQUEST_TIMEOUT_SECONDS`). If the provider is busy — e.g. OmniVoice
-processing an earlier request — this call simply waits behind it; use
+processing an earlier request, or waiting for Supertonic to release the shared
+GPU — this call simply waits behind it; use
 `/v1/audio/jobs` instead if you want to see queue position rather than block.
 
 **Note:** if this HTTP request times out or the client disconnects, the job
@@ -88,9 +134,9 @@ jobs and any later poll depend on it completing.
 |---|---|---|---|
 | `model` | string | no | Provider to use. `tts-1`, `tts-1-hd`, `gpt-4o-mini-tts`, `auto`, or blank all map to the default provider. Use the provider ID (e.g. `espeak-ng`) to target a specific one. |
 | `input` | string | yes | Text to synthesize. Max `AUDIO_MAX_INPUT_CHARS` characters. |
-| `voice` | string | no | Voice name. Provider-specific. Falls back to `AUDIO_ESPEAK_DEFAULT_VOICE`. |
-| `language` | string | no | BCP-47 language tag. Used as fallback voice when `voice` is blank. |
-| `response_format` | string | no | `mp3` (default), `wav`, `ogg`, `opus`, or `flac`. |
+| `voice` | string | no | Provider voice name, or `auto` (the default) to let the provider choose. Explicit voices must support `language`. |
+| `language` | string | no | BCP-47 language tag, or `auto` (the default when omitted) when supported by the selected provider. The server uses it to filter eligible voices. |
+| `response_format` | string | no | `mp3` (default), `wav`, `ogg`, `opus`, `flac`, or raw `pcm`. |
 | `speed` | float | no | Playback speed multiplier. Range 0.25–4.0. |
 | `provider_options` | object | no | Provider-specific settings, opaque to the server and validated only by the resolved provider. See [`docs/providers.md`](providers.md) for each provider's schema (e.g. OmniVoice's `steps`, `seed`, `chunk_seconds`, `chunk_threshold`). Unknown fields within it are rejected by the provider, not the server. |
 | `stream` | boolean | no | Stream audio progressively instead of buffering the full result. Only honored if the resolved provider supports it (currently `espeak-ng` only) — otherwise silently falls back to the buffered response below. See "Streaming" below. |
@@ -99,7 +145,7 @@ jobs and any later poll depend on it completing.
 
 | Header | Description |
 |---|---|
-| `Content-Type` | `audio/mpeg`, `audio/wav`, `audio/ogg`, `audio/ogg; codecs=opus`, or `audio/flac` |
+| `Content-Type` | `audio/mpeg`, `audio/wav`, `audio/ogg`, `audio/ogg; codecs=opus`, `audio/flac`, or `audio/pcm` |
 | `X-TTS-Provider` | Provider that handled the request |
 | `X-TTS-Model` | Model/provider ID echoed back |
 | `X-TTS-Voice` | Voice actually used |
@@ -126,9 +172,9 @@ curl -sS --no-buffer http://127.0.0.1:8010/v1/audio/speech \
   --output out.mp3
 ```
 
-When streaming is used, audio bytes are written and flushed to the response as they're produced — playback can start before generation finishes, instead of waiting for the whole file. Behavior differs from the buffered path in one important way: **streaming bypasses the job queue entirely** and is tied directly to this HTTP connection, so if the client disconnects or the request times out, synthesis is actually cancelled (there's no other consumer waiting on a streamed response, unlike a queued job). Headers (`X-TTS-*`, `Content-Type`) are still sent up front, before any audio bytes, since voice/format are resolved synchronously from the request.
+Audio bytes are written and flushed to the response as they're produced — playback can start before generation finishes. Stateless providers stream directly; lifecycle-managed providers first enter the queue and wait for warm-up/shared-resource scheduling, then stream through the same live response. Disconnecting the client cancels the active stream. Headers (`X-TTS-*`, `Content-Type`) are sent when the provider begins producing audio.
 
-If the resolved provider doesn't support streaming (e.g. `omnivoice`), `stream` is silently ignored and the normal buffered response is returned instead.
+If the resolved provider doesn't support streaming, `stream` is silently ignored and the normal buffered response is returned instead. OmniVoice and Supertonic use audio.cpp's streaming mode when configured; their SSE events are decoded by audio-server into raw PCM chunks for the client.
 
 ---
 
@@ -178,8 +224,8 @@ Poll a job's status.
 
 | `status` | Meaning |
 |---|---|
-| `queued` | Waiting for a worker; `queue_position` reflects its place in line. |
-| `running` | Actively synthesizing (this also covers OmniVoice model warm-up on a cold start — there's no separate "loading" state). |
+| `queued` | Waiting for a provider worker or for the shared resource handoff; `queue_position` reflects its place in the provider queue. |
+| `running` | Actively warming or synthesizing. A cold sidecar is started only after its job reaches the shared resource. |
 | `succeeded` | Done; fetch audio from `GET /v1/audio/jobs/{id}/audio`. |
 | `failed` | `error` field holds the failure reason. |
 
