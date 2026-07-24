@@ -1,0 +1,35 @@
+# ── server ──
+addr: "127.0.0.1:8010"
+api_key: ""
+web_dir: "web"
+
+# ── audio ──
+audio_store_dir: "audio-output"
+audio_ttl_seconds: 0          # 0 = forever
+max_input_chars: 1000000
+request_timeout_seconds: 0    # 0 = disabled
+max_concurrency: 2
+
+# ── espeak-ng ──
+espeak_path: "espeak-ng"
+espeak_default_voice: "en"
+mp3_bitrate: "48k"
+ffmpeg_path: "ffmpeg"
+
+# ── GPU providers (audio.cpp) ──
+omnivoice_enabled: true
+omnivoice_addr: "http://127.0.0.1:8020"
+omnivoice_concurrency: 1
+supertonic_addr: "http://127.0.0.1:8022"
+audiocpp_bin: "audio.cpp/build/linux-cuda-release/bin/audiocpp_server"
+audiocpp_idle_unload_seconds: 600
+
+# ── alignment (MFA) ──
+align_enabled: true
+align_mfa_env: "mfa/env"
+align_mfa_work_dir: "mfa/work"
+align_mfa_models_config: "mfa/models.yaml"
+
+# ── disabled providers ──
+kokoro_enabled: false
+faster_whisper_enabled: false

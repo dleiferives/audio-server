@@ -29,35 +29,78 @@ import (
 	"github.com/dleiferives/audio-server/internal/store"
 	"github.com/dleiferives/audio-server/internal/sttprovider"
 
-	"gopkg.in/yaml.v3"
+	yaml "gopkg.in/yaml.v3"
 )
 
+type configFile struct {
+	Addr                       string `yaml:"addr"`
+	APIKey                     string `yaml:"api_key"`
+	WebDir                     string `yaml:"web_dir"`
+	AudioStoreDir              string `yaml:"audio_store_dir"`
+	AudioTTLSeconds            int    `yaml:"audio_ttl_seconds"`
+	MaxInputChars              int    `yaml:"max_input_chars"`
+	RequestTimeoutSeconds      int    `yaml:"request_timeout_seconds"`
+	MaxConcurrency             int    `yaml:"max_concurrency"`
+	EspeakPath                 string `yaml:"espeak_path"`
+	EspeakDefaultVoice         string `yaml:"espeak_default_voice"`
+	MP3Bitrate                 string `yaml:"mp3_bitrate"`
+	FFmpegPath                 string `yaml:"ffmpeg_path"`
+	OmnivoiceEnabled           bool   `yaml:"omnivoice_enabled"`
+	OmnivoiceAddr              string `yaml:"omnivoice_addr"`
+	OmnivoiceConcurrency       int    `yaml:"omnivoice_concurrency"`
+	SupertonicAddr             string `yaml:"supertonic_addr"`
+	AudiocppBin                string `yaml:"audiocpp_bin"`
+	AudiocppIdleUnloadSeconds  int    `yaml:"audiocpp_idle_unload_seconds"`
+	KokoroEnabled              bool   `yaml:"kokoro_enabled"`
+	FasterWhisperEnabled       bool   `yaml:"faster_whisper_enabled"`
+	AlignEnabled               bool   `yaml:"align_enabled"`
+	AlignMFAEnv                string `yaml:"align_mfa_env"`
+	AlignMFAWorkDir            string `yaml:"align_mfa_work_dir"`
+	AlignMFAModelsConfig       string `yaml:"align_mfa_models_config"`
+}
+
+func loadConfig(path string) configFile {
+	var cfg configFile
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return cfg
+	}
+	yaml.Unmarshal(data, &cfg)
+	return cfg
+}
+
 func main() {
-	addr := flag.String("addr", env("AUDIO_ADDR", "127.0.0.1:8010"), "listen address")
-	apiKey := flag.String("api-key", env("AUDIO_API_KEY", ""), "optional bearer API key")
-	maxConcurrency := flag.Int("max-concurrency", envInt("AUDIO_MAX_CONCURRENCY", 2), "maximum concurrent synthesis requests")
-	requestTimeoutSeconds := flag.Int("request-timeout-seconds", envInt("AUDIO_REQUEST_TIMEOUT_SECONDS", 0), "synthesis request timeout in seconds (0 = disabled)")
-	maxInputChars := flag.Int("max-input-chars", envInt("AUDIO_MAX_INPUT_CHARS", 1000000), "maximum input length in characters")
-	espeakPath := flag.String("espeak-path", env("AUDIO_ESPEAK_PATH", "espeak-ng"), "espeak-ng binary path")
-	ffmpegPath := flag.String("ffmpeg-path", env("AUDIO_FFMPEG_PATH", "ffmpeg"), "ffmpeg binary path")
-	mp3Bitrate := flag.String("mp3-bitrate", env("AUDIO_MP3_BITRATE", "48k"), "mp3 bitrate for generated speech")
+	cfgPath := flag.String("config", env("AUDIO_CONFIG", "config.yml"), "path to config file")
+	flag.Parse()
+
+	yaml.Unmarshal(nil, nil)
+
+	cfg := loadConfig(*cfgPath)
+
+	addr := flag.String("addr", env("AUDIO_ADDR", cfg.Addr), "listen address")
+	apiKey := flag.String("api-key", env("AUDIO_API_KEY", cfg.APIKey), "optional bearer API key")
+	maxConcurrency := flag.Int("max-concurrency", envInt("AUDIO_MAX_CONCURRENCY", cfg.MaxConcurrency), "maximum concurrent synthesis requests")
+	requestTimeoutSeconds := flag.Int("request-timeout-seconds", envInt("AUDIO_REQUEST_TIMEOUT_SECONDS", cfg.RequestTimeoutSeconds), "synthesis request timeout in seconds (0 = disabled)")
+	maxInputChars := flag.Int("max-input-chars", envInt("AUDIO_MAX_INPUT_CHARS", cfg.MaxInputChars), "maximum input length in characters")
+	espeakPath := flag.String("espeak-path", env("AUDIO_ESPEAK_PATH", cfg.EspeakPath), "espeak-ng binary path")
+	ffmpegPath := flag.String("ffmpeg-path", env("AUDIO_FFMPEG_PATH", cfg.FFmpegPath), "ffmpeg binary path")
+	mp3Bitrate := flag.String("mp3-bitrate", env("AUDIO_MP3_BITRATE", cfg.MP3Bitrate), "mp3 bitrate for generated speech")
 	defaultProvider := flag.String("default-provider", env("AUDIO_DEFAULT_PROVIDER", "espeak-ng"), "default provider id")
-	defaultVoice := flag.String("espeak-default-voice", env("AUDIO_ESPEAK_DEFAULT_VOICE", "en"), "default eSpeak voice")
-	omnivoiceAddr := flag.String("omnivoice-addr", env("AUDIO_OMNIVOICE_ADDR", ""), "OmniVoice sidecar base URL (e.g. http://127.0.0.1:8020); disabled when blank")
-	omnivoiceConcurrency := flag.Int("omnivoice-concurrency", envInt("AUDIO_OMNIVOICE_CONCURRENCY", 1), "concurrent OmniVoice workers")
-	supertonicAddr := flag.String("supertonic-addr", env("AUDIO_SUPERTONIC_ADDR", ""), "Supertonic sidecar base URL (e.g. http://127.0.0.1:8022); disabled when blank")
-	audiocppBin := flag.String("audiocpp-bin", env("AUDIO_AUDIOCPP_BIN", "audio.cpp/build/linux-cuda-release/bin/audiocpp_server"), "path to audiocpp_server binary")
-	audiocppIdle := flag.Int("audiocpp-idle-unload-seconds", envInt("AUDIO_AUDIOCPP_IDLE_UNLOAD", 600), "seconds before unloading idle audiocpp_server instances")
-	resourceSwitchDelaySeconds := flag.Int("resource-switch-delay-seconds", envInt("AUDIO_RESOURCE_SWITCH_DELAY_SECONDS", 1), "quiet seconds before switching the shared audio.cpp GPU between providers")
-	kokoroAddr := flag.String("kokoro-addr", env("AUDIO_KOKORO_ADDR", ""), "Kokoro TTS sidecar base URL (e.g. http://127.0.0.1:8021); disabled when blank")
-	kokoroConcurrency := flag.Int("kokoro-concurrency", envInt("AUDIO_KOKORO_CONCURRENCY", 1), "concurrent Kokoro workers")
-	kokoroIdle := flag.Int("kokoro-idle-unload-seconds", envInt("AUDIO_KOKORO_IDLE_UNLOAD_SECONDS", 30), "seconds an empty Kokoro queue waits before the model is unloaded")
-	_ = flag.Int("model-idle-unload-seconds", envInt("AUDIO_MODEL_IDLE_UNLOAD_SECONDS", 600), "seconds before unloading idle GPU models (default 10 min)")
-	fasterWhisperAddr := flag.String("faster-whisper-addr", env("AUDIO_FASTERWHISPER_ADDR", ""), "faster-whisper sidecar base URL (e.g. http://127.0.0.1:8030); disabled when blank")
-	webDir := flag.String("web-dir", env("AUDIO_WEB_DIR", ""), "optional path to static web frontend directory")
-	audioTTL := flag.Int("audio-ttl-seconds", envInt("AUDIO_AUDIO_TTL_SECONDS", 0), "audio file retention in seconds (0 = forever)")
-	audioStoreDir := flag.String("audio-store-dir", env("AUDIO_STORE_DIR", ""), "directory for generated audio files (empty = in-memory)")
-	_ = flag.Int("supertonic-port", envInt("AUDIO_SUPERTONIC_PORT", 8022), "DEPRECATED — shares same audiocpp_server as omnivoice")
+	defaultVoice := flag.String("espeak-default-voice", env("AUDIO_ESPEAK_DEFAULT_VOICE", cfg.EspeakDefaultVoice), "default eSpeak voice")
+	omnivoiceAddr := flag.String("omnivoice-addr", env("AUDIO_OMNIVOICE_ADDR", cfg.OmnivoiceAddr), "OmniVoice sidecar base URL (e.g. http://127.0.0.1:8020); disabled when blank")
+	omnivoiceConcurrency := flag.Int("omnivoice-concurrency", envInt("AUDIO_OMNIVOICE_CONCURRENCY", cfg.OmnivoiceConcurrency), "concurrent OmniVoice workers")
+	supertonicAddr := flag.String("supertonic-addr", env("AUDIO_SUPERTONIC_ADDR", cfg.SupertonicAddr), "Supertonic sidecar base URL (e.g. http://127.0.0.1:8022); disabled when blank")
+	audiocppBin := flag.String("audiocpp-bin", env("AUDIO_AUDIOCPP_BIN", cfg.AudiocppBin), "path to audiocpp_server binary")
+	audiocppIdle := flag.Int("audiocpp-idle-unload-seconds", envInt("AUDIO_AUDIOCPP_IDLE_UNLOAD", cfg.AudiocppIdleUnloadSeconds), "seconds before unloading idle audiocpp_server instances")
+	kokoroEnabled := flag.Bool("kokoro-enabled", cfg.KokoroEnabled, "enable Kokoro TTS provider")
+	fasterWhisperEnabled := flag.Bool("faster-whisper-enabled", cfg.FasterWhisperEnabled, "enable faster-whisper STT provider")
+	webDir := flag.String("web-dir", env("AUDIO_WEB_DIR", cfg.WebDir), "optional path to static web frontend directory")
+	audioTTL := flag.Int("audio-ttl-seconds", envInt("AUDIO_AUDIO_TTL_SECONDS", cfg.AudioTTLSeconds), "audio file retention in seconds (0 = forever)")
+	audioStoreDir := flag.String("audio-store-dir", env("AUDIO_STORE_DIR", cfg.AudioStoreDir), "directory for generated audio files (empty = in-memory)")
+	alignEnabled := flag.Bool("align-enabled", cfg.AlignEnabled, "enable MFA forced alignment")
+	alignMFAEnv := flag.String("align-mfa-env", cfg.AlignMFAEnv, "path to MFA micromamba environment")
+	alignMFAWorkDir := flag.String("align-mfa-work-dir", cfg.AlignMFAWorkDir, "MFA working directory")
+	alignMFAModelsConfig := flag.String("align-mfa-models-config", cfg.AlignMFAModelsConfig, "path to language model YAML config")
 	flag.Parse()
 
 	encoder := encode.NewFFmpeg(*ffmpegPath, *mp3Bitrate)
@@ -88,9 +131,10 @@ func main() {
 		providers = append(providers, st)
 		workers["supertonic"] = 2
 	}
-	if strings.TrimSpace(*kokoroAddr) != "" {
-		providers = append(providers, kokoro.New(*kokoroAddr, nil, encoder))
-		workers["kokoro"] = *kokoroConcurrency
+	if *kokoroEnabled {
+		kokoroAddr := env("AUDIO_KOKORO_ADDR", "http://127.0.0.1:8021")
+		providers = append(providers, kokoro.New(kokoroAddr, nil, encoder))
+		workers["kokoro"] = 1
 	}
 
 	providerMap := make(map[string]provider.Provider, len(providers))
@@ -104,15 +148,9 @@ func main() {
 		const gpuGroup = "audiocpp-gpu"
 		resourceGroups["omnivoice"] = gpuGroup
 		resourceGroups["supertonic"] = gpuGroup
-		if *resourceSwitchDelaySeconds > 0 {
-			resourceSwitchDelay[gpuGroup] = time.Duration(*resourceSwitchDelaySeconds) * time.Second
-		}
 		idleDelay := time.Duration(*audiocppIdle) * time.Second
 		idleUnload["omnivoice"] = idleDelay
 		idleUnload["supertonic"] = idleDelay
-	}
-	if strings.TrimSpace(*kokoroAddr) != "" && *kokoroIdle > 0 {
-		idleUnload["kokoro"] = time.Duration(*kokoroIdle) * time.Second
 	}
 
 	requestTimeout := time.Duration(*requestTimeoutSeconds) * time.Second
@@ -126,8 +164,9 @@ func main() {
 	})
 
 	var sttProviders []sttprovider.Provider
-	if strings.TrimSpace(*fasterWhisperAddr) != "" {
-		sttProviders = append(sttProviders, fasterwhisper.New(*fasterWhisperAddr, nil))
+	if *fasterWhisperEnabled {
+		fwAddr := env("AUDIO_FASTERWHISPER_ADDR", "http://127.0.0.1:8030")
+		sttProviders = append(sttProviders, fasterwhisper.New(fwAddr, nil))
 	}
 
 	var audioStore *store.Store
@@ -141,9 +180,9 @@ func main() {
 	}
 
 	var alignProvider server.Aligner
-	if envBool("AUDIO_ALIGN", false) {
-		langMap := loadAlignLanguages("mfa/models.yaml")
-		alignProvider = align.NewAlignProvider("mfa/env", "mfa/work", "mfa/bin", langMap)
+	if *alignEnabled {
+		langMap := loadAlignLanguages(*alignMFAModelsConfig)
+		alignProvider = align.NewAlignProvider(*alignMFAEnv, *alignMFAWorkDir, "", langMap)
 		log.Printf("alignment: enabled (%d languages)", len(langMap))
 	}
 
@@ -158,7 +197,7 @@ func main() {
 		SttProviders:    sttProviders,
 		WebDir:          *webDir,
 		AudioStore:      audioStore,
-		AlignProvider:    alignProvider,
+		AlignProvider:   alignProvider,
 	})
 	if err != nil {
 		log.Fatalf("audio server: %v", err)
@@ -210,14 +249,6 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
-}
-
-func envBool(key string, fallback bool) bool {
-	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
-	if value == "" {
-		return fallback
-	}
-	return value == "1" || value == "true" || value == "yes"
 }
 
 func loadAlignLanguages(path string) map[string]align.LanguageModel {
