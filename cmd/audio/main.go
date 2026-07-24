@@ -118,6 +118,9 @@ func main() {
 		gpuLifecycle = lifecycle.NewManager(*audiocppBin)
 		gpuLifecycle.Register("omnivoice", "audio.cpp/omnivoice-server.json", 8020, time.Duration(*audiocppIdle)*time.Second)
 		gpuLifecycle.Register("supertonic", "audio.cpp/supertonic-config.json", 8022, time.Duration(*audiocppIdle)*time.Second)
+		if *sttEnabled && strings.TrimSpace(*nemotronAddr) != "" {
+			gpuLifecycle.Register("nemotron", "audio.cpp/nemotron-config.json", 8024, time.Duration(*audiocppIdle)*time.Second)
+		}
 	}
 
 	if strings.TrimSpace(*omnivoiceAddr) != "" {
@@ -174,7 +177,11 @@ func main() {
 		sttProviders = append(sttProviders, fasterwhisper.New(fwAddr, nil))
 	}
 	if *sttEnabled && strings.TrimSpace(*nemotronAddr) != "" {
-		sttProviders = append(sttProviders, nemotron.New(*nemotronAddr, nil))
+		nm := nemotron.New(*nemotronAddr, nil)
+		if gpuLifecycle != nil {
+			nm.StartFunc = func() error { return gpuLifecycle.Start("nemotron", true) }
+		}
+		sttProviders = append(sttProviders, nm)
 	}
 
 	var audioStore *store.Store

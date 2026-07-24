@@ -21,8 +21,9 @@ type HTTPClient interface {
 }
 
 type Provider struct {
-	BaseURL string
-	Client  HTTPClient
+	BaseURL   string
+	Client    HTTPClient
+	StartFunc func() error
 }
 
 var _ sttprovider.Provider = Provider{}
@@ -66,6 +67,12 @@ type errorResponse struct {
 }
 
 func (p Provider) Transcribe(ctx context.Context, req sttprovider.TranscriptionRequest) (sttprovider.TranscriptionResult, error) {
+	if p.StartFunc != nil {
+		if err := p.StartFunc(); err != nil {
+			return sttprovider.TranscriptionResult{}, fmt.Errorf("%w: lifecycle start failed: %v", sttprovider.ErrUnavailable, err)
+		}
+	}
+
 	if len(req.Audio) == 0 {
 		return sttprovider.TranscriptionResult{}, fmt.Errorf("%w: audio is required", sttprovider.ErrInvalidRequest)
 	}
