@@ -114,6 +114,30 @@ audio { width: 100%; margin-top: 10px; }
 </section>
 
 <section>
+  <h2>Forced Alignment</h2>
+  <p style="font-size:0.8rem;color:#888;margin-bottom:10px;">Align transcript to audio — returns word and phone timestamps.</p>
+  <div>
+    <label>Audio file</label>
+    <input type="file" id="align-audio" accept="audio/*">
+  </div>
+  <div>
+    <label>Transcript (exact text spoken)</label>
+    <textarea id="align-transcript" placeholder="What was spoken in the audio..." rows="4"></textarea>
+  </div>
+  <div class="row">
+    <div>
+      <label>Language</label>
+      <select id="align-language"></select>
+    </div>
+    <div style="align-self:end;">
+      <button id="align-submit">Align</button>
+    </div>
+  </div>
+  <div id="align-status" style="margin-top:10px;font-size:0.8rem;color:#888;"></div>
+  <div class="output" id="align-output"></div>
+</section>
+
+<section>
   <h2>Speech-to-Text</h2>
   <div class="row">
     <button id="stt-record" class="secondary">🎤 Record</button>
@@ -144,6 +168,8 @@ async function init() {
   document.getElementById('stt-record').onclick = toggleRecord;
   document.getElementById('stt-upload-trigger').onclick = () => sttFileEl.click();
   sttFileEl.onchange = doSttUpload;
+  document.getElementById('align-submit').onclick = doAlign;
+  loadAlignLanguages();
 }
 
 function renderStatus(health) {
@@ -521,6 +547,77 @@ const ttsFormatEl = document.getElementById('tts-format');
 const ttsSpeedEl = document.getElementById('tts-speed');
 const ttsOutputEl = document.getElementById('tts-output');
 const sttFileEl = document.getElementById('stt-file');
+
+async function loadAlignLanguages() {
+  try {
+    const r = await fetch(API + '/v1/audio/alignments/models');
+    if (!r.ok) return;
+    const data = await r.json();
+    const sel = document.getElementById('align-language');
+    for (const lang of (data.languages || [])) {
+      const opt = document.createElement('option');
+      opt.value = lang;
+      opt.textContent = lang;
+      sel.appendChild(opt);
+    }
+  } catch (e) {}
+}
+
+async function doAlign() {
+  const file = document.getElementById('align-audio').files[0];
+  const transcript = document.getElementById('align-transcript').value.trim();
+  const language = document.getElementById('align-language').value;
+  if (!file || !transcript || !language) return;
+
+  const btn = document.getElementById('align-submit');
+  btn.disabled = true;
+  btn.textContent = 'Submitting...';
+
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('transcript', transcript);
+  fd.append('language', language);
+
+  try {
+    const r = await fetch(API + '/v1/audio/alignments', { method: 'POST', body: fd });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({ error: r.statusText }));
+      throw new Error(err.error);
+    }
+    const job = await r.json();
+
+    let poll;
+    poll = setInterval(async () => {
+      const sr = await fetch(API + '/v1/audio/alignments/' + job.id);
+      const state = await sr.json();
+      document.getElementById('align-status').textContent = `Status: ${state.status}`;
+      btn.textContent = `Aligning... (${state.status})`;
+      if (state.status === 'succeeded') {
+        clearInterval(poll);
+        if (state.result && state.result.words) {
+          let html = '<table style="width:100%;font-size:0.8rem;border-collapse:collapse;">';
+          for (const w of state.result.words) {
+            html += `<tr><td style="padding:2px 8px;border-bottom:1px solid #222;">${(w.start || 0).toFixed(2)}s</td><td style="padding:2px 8px;border-bottom:1px solid #222;">${w.text}</td></tr>`;
+          }
+          html += '</table>';
+          document.getElementById('align-output').innerHTML = html;
+          document.getElementById('align-status').textContent = `Done — ${state.result.words.length} words aligned`;
+        }
+        btn.textContent = 'Align';
+        btn.disabled = false;
+      } else if (state.status === 'failed') {
+        clearInterval(poll);
+        document.getElementById('align-output').innerHTML = `<pre>Error: ${state.error || 'failed'}</pre>`;
+        btn.textContent = 'Align';
+        btn.disabled = false;
+      }
+    }, 2000);
+  } catch (e) {
+    document.getElementById('align-output').innerHTML = `<pre>Error: ${e.message}</pre>`;
+    btn.textContent = 'Align';
+    btn.disabled = false;
+  }
+}
 
 init();
 </script>
