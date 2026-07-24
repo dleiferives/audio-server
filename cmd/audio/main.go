@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dleiferives/audio-server/internal/encode"
+	"github.com/dleiferives/audio-server/internal/lifecycle"
 	"github.com/dleiferives/audio-server/internal/provider"
 	"github.com/dleiferives/audio-server/internal/provider/espeak"
 	"github.com/dleiferives/audio-server/internal/provider/fasterwhisper"
@@ -41,6 +42,9 @@ func main() {
 	defaultVoice := flag.String("espeak-default-voice", env("AUDIO_ESPEAK_DEFAULT_VOICE", "en"), "default eSpeak voice")
 	omnivoiceAddr := flag.String("omnivoice-addr", env("AUDIO_OMNIVOICE_ADDR", ""), "OmniVoice sidecar base URL (e.g. http://127.0.0.1:8020); disabled when blank")
 	omnivoiceConcurrency := flag.Int("omnivoice-concurrency", envInt("AUDIO_OMNIVOICE_CONCURRENCY", 1), "concurrent OmniVoice workers")
+	supertonicAddr := flag.String("supertonic-addr", env("AUDIO_SUPERTONIC_ADDR", ""), "Supertonic sidecar base URL (e.g. http://127.0.0.1:8022); disabled when blank")
+	audiocppBin := flag.String("audiocpp-bin", env("AUDIO_AUDIOCPP_BIN", "audio.cpp/build/linux-cuda-release/bin/audiocpp_server"), "path to audiocpp_server binary")
+	audiocppIdle := flag.Int("audiocpp-idle-unload-seconds", envInt("AUDIO_AUDIOCPP_IDLE_UNLOAD", 600), "seconds before unloading idle audiocpp_server instances")
 	kokoroAddr := flag.String("kokoro-addr", env("AUDIO_KOKORO_ADDR", ""), "Kokoro TTS sidecar base URL (e.g. http://127.0.0.1:8021); disabled when blank")
 	kokoroConcurrency := flag.Int("kokoro-concurrency", envInt("AUDIO_KOKORO_CONCURRENCY", 1), "concurrent Kokoro workers")
 	_ = flag.Int("kokoro-idle-unload-seconds", envInt("AUDIO_KOKORO_IDLE_UNLOAD_SECONDS", 30), "seconds an empty Kokoro queue waits before the model is unloaded")
@@ -60,10 +64,19 @@ func main() {
 	providers := []provider.Provider{espeakProvider}
 	workers := map[string]int{espeakProvider.ID(): *maxConcurrency}
 
+	var gpuLifecycle *lifecycle.Manager
+	if strings.TrimSpace(*audiocppBin) != "" && strings.TrimSpace(*omnivoiceAddr) != "" {
+		gpuLifecycle = lifecycle.NewManager(*audiocppBin)
+		gpuLifecycle.Register("omnivoice", "audio.cpp/omnivoice-config.json", 8020, time.Duration(*audiocppIdle)*time.Second)
+		gpuLifecycle.Register("supertonic", "audio.cpp/supertonic-config.json", 8022, time.Duration(*audiocppIdle)*time.Second)
+	}
+
 	if strings.TrimSpace(*omnivoiceAddr) != "" {
 		providers = append(providers, omnivoice.New(*omnivoiceAddr, nil, encoder))
 		workers["omnivoice"] = *omnivoiceConcurrency
-		providers = append(providers, supertonic.New(*omnivoiceAddr, nil, encoder))
+	}
+	if strings.TrimSpace(*supertonicAddr) != "" {
+		providers = append(providers, supertonic.New(*supertonicAddr, nil, encoder))
 		workers["supertonic"] = 2
 	}
 	if strings.TrimSpace(*kokoroAddr) != "" {
@@ -137,6 +150,9 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		httpServer.Shutdown(ctx)
+	}
+	if gpuLifecycle != nil {
+		gpuLifecycle.StopAll()
 	}
 }
 

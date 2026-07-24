@@ -7,6 +7,7 @@ FASTERWHISPER ?= 0
 # ── ports ──
 SERVER_PORT    ?= 8010
 OMNIVOICE_PORT ?= 8020
+SUPERTONIC_PORT ?= 8022
 KOKORO_PORT    ?= 8021
 WHISPER_PORT   ?= 8030
 
@@ -55,8 +56,12 @@ run: build
 		echo '  →   espeak-ng ready'; \
 	fi; \
 	if [ "$(OMNIVOICE)" = "1" ]; then \
-		echo '  →   launching audiocpp_server on :$(OMNIVOICE_PORT)'; \
-		$(AUDIOCPP_BIN) --config $(AUDIOCPP_CFG) & echo $$! > $(PIDIR)/audiocpp.pid; \
+		echo '  →   launching audiocpp_server (omnivoice) on :$(OMNIVOICE_PORT)'; \
+		$(AUDIOCPP_BIN) --config $(AUDIOCPP_CFG) & echo $$! > $(PIDIR)/audiocpp-omni.pid; \
+	fi; \
+	if [ "$(OMNIVOICE)" = "1" ] && [ -f audio.cpp/supertonic-config.json ]; then \
+		echo '  →   launching audiocpp_server (supertonic) on :$(SUPERTONIC_PORT)'; \
+		$(AUDIOCPP_BIN) --config audio.cpp/supertonic-config.json & echo $$! > $(PIDIR)/audiocpp-supertonic.pid; \
 	fi; \
 	if [ "$(KOKORO)" = "1" ]; then \
 		echo '  →   launching kokoro sidecar on :$(KOKORO_PORT)'; \
@@ -70,6 +75,11 @@ run: build
 		echo '  →   waiting for omnivoice...'; \
 		for i in $$(seq 1 30); do \
 			curl -sS http://127.0.0.1:$(OMNIVOICE_PORT)/health > /dev/null 2>&1 && break; \
+			sleep 1; \
+		done; \
+		echo '  →   waiting for supertonic...'; \
+		for i in $$(seq 1 30); do \
+			curl -sS http://127.0.0.1:$(SUPERTONIC_PORT)/health > /dev/null 2>&1 && break; \
 			sleep 1; \
 		done; \
 	fi; \
@@ -90,6 +100,7 @@ run: build
 	ARGS=""; \
 	if [ "$(OMNIVOICE)" = "1" ]; then \
 		ARGS="$$ARGS -omnivoice-addr=http://127.0.0.1:$(OMNIVOICE_PORT) -omnivoice-concurrency=1"; \
+		ARGS="$$ARGS -supertonic-addr=http://127.0.0.1:$(SUPERTONIC_PORT)"; \
 	fi; \
 	if [ "$(KOKORO)" = "1" ]; then \
 		ARGS="$$ARGS -kokoro-addr=http://127.0.0.1:$(KOKORO_PORT) -kokoro-concurrency=1 -kokoro-idle-unload-seconds=30"; \
