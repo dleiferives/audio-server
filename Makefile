@@ -68,10 +68,6 @@ run: build
 		echo '  →   launching faster-whisper sidecar on :$(WHISPER_PORT)'; \
 		./stt/fasterwhisper/server.py --port $(WHISPER_PORT) & echo $$! > $(PIDIR)/whisper.pid; \
 	fi; \
-	if [ "$(FASTERWHISPER)" = "1" ]; then \
-		echo '  →   launching nemotron ASR on :$(NEMOTRON_PORT)'; \
-		$(AUDIOCPP_BIN) --config audio.cpp/nemotron-config.json & echo $$! > $(PIDIR)/nemotron.pid; \
-	fi; \
 	if [ "$(OMNIVOICE)" = "1" ]; then \
 		echo '  →   skipping wait for lifecycle-managed GPU models'; \
 	fi; \
