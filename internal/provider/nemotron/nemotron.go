@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"strings"
@@ -90,21 +91,27 @@ func (p Provider) Transcribe(ctx context.Context, req sttprovider.TranscriptionR
 	}
 	tmpFile.Close()
 
-	body, err := json.Marshal(map[string]any{
-		"model":           "nemotron",
-		"audio":           tmpFile.Name(),
-		"language":        req.Language,
-		"response_format": "json",
-	})
+	// Build multipart form data (audiocpp_server expects multipart, not JSON)
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	w.WriteField("model", "nemotron")
+	if req.Language != "" {
+		w.WriteField("language", req.Language)
+	}
+	part, err := w.CreateFormFile("file", req.Filename)
 	if err != nil {
 		return sttprovider.TranscriptionResult{}, fmt.Errorf("%w: %v", sttprovider.ErrUnavailable, err)
 	}
+	if _, err := part.Write(req.Audio); err != nil {
+		return sttprovider.TranscriptionResult{}, fmt.Errorf("%w: %v", sttprovider.ErrUnavailable, err)
+	}
+	w.Close()
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.BaseURL+"/v1/audio/transcriptions", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.BaseURL+"/v1/audio/transcriptions", &buf)
 	if err != nil {
 		return sttprovider.TranscriptionResult{}, fmt.Errorf("%w: %v", sttprovider.ErrUnavailable, err)
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Content-Type", w.FormDataContentType())
 
 	resp, err := p.Client.Do(httpReq)
 	if err != nil {
