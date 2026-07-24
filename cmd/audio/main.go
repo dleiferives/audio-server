@@ -49,9 +49,6 @@ func main() {
 	kokoroConcurrency := flag.Int("kokoro-concurrency", envInt("AUDIO_KOKORO_CONCURRENCY", 1), "concurrent Kokoro workers")
 	_ = flag.Int("kokoro-idle-unload-seconds", envInt("AUDIO_KOKORO_IDLE_UNLOAD_SECONDS", 30), "seconds an empty Kokoro queue waits before the model is unloaded")
 	_ = flag.Int("model-idle-unload-seconds", envInt("AUDIO_MODEL_IDLE_UNLOAD_SECONDS", 600), "seconds before unloading idle GPU models (default 10 min)")
-	_ = flag.String("audiocpp-bin", env("AUDIO_AUDIOCPP_BIN", "audio.cpp/build/linux-cuda-release/bin/audiocpp_server"), "path to audiocpp_server binary")
-	_ = flag.String("audiocpp-omnivoice-cfg", env("AUDIO_AUDIOCPP_OMNIVOICE_CFG", "audio.cpp/omnivoice-config.json"), "config for OmniVoice instance")
-	_ = flag.String("audiocpp-supertonic-cfg", env("AUDIO_AUDIOCPP_SUPERTONIC_CFG", "audio.cpp/supertonic-config.json"), "config for Supertonic instance")
 	fasterWhisperAddr := flag.String("faster-whisper-addr", env("AUDIO_FASTERWHISPER_ADDR", ""), "faster-whisper sidecar base URL (e.g. http://127.0.0.1:8030); disabled when blank")
 	webDir := flag.String("web-dir", env("AUDIO_WEB_DIR", ""), "optional path to static web frontend directory")
 	audioTTL := flag.Int("audio-ttl-seconds", envInt("AUDIO_AUDIO_TTL_SECONDS", 0), "audio file retention in seconds (0 = forever)")
@@ -72,11 +69,19 @@ func main() {
 	}
 
 	if strings.TrimSpace(*omnivoiceAddr) != "" {
-		providers = append(providers, omnivoice.New(*omnivoiceAddr, nil, encoder))
+		ov := omnivoice.New(*omnivoiceAddr, nil, encoder)
+		if gpuLifecycle != nil {
+			ov.StartFunc = func() error { return gpuLifecycle.Start("omnivoice", true) }
+		}
+		providers = append(providers, ov)
 		workers["omnivoice"] = *omnivoiceConcurrency
 	}
 	if strings.TrimSpace(*supertonicAddr) != "" {
-		providers = append(providers, supertonic.New(*supertonicAddr, nil, encoder))
+		st := supertonic.New(*supertonicAddr, nil, encoder)
+		if gpuLifecycle != nil {
+			st.StartFunc = func() error { return gpuLifecycle.Start("supertonic", true) }
+		}
+		providers = append(providers, st)
 		workers["supertonic"] = 2
 	}
 	if strings.TrimSpace(*kokoroAddr) != "" {

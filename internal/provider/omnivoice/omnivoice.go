@@ -31,9 +31,10 @@ type Encoder interface {
 }
 
 type Provider struct {
-	BaseURL string
-	Client  HTTPClient
-	Encoder Encoder
+	BaseURL   string
+	Client    HTTPClient
+	Encoder   Encoder
+	StartFunc func() error
 }
 
 var (
@@ -154,6 +155,12 @@ type errorResponse struct {
 }
 
 func (p Provider) Synthesize(ctx context.Context, req provider.SpeechRequest) (provider.SpeechResult, error) {
+	if p.StartFunc != nil {
+		if err := p.StartFunc(); err != nil {
+			return provider.SpeechResult{}, fmt.Errorf("%w: lifecycle start failed: %v", provider.ErrUnavailable, err)
+		}
+	}
+
 	format := strings.ToLower(strings.TrimSpace(req.ResponseFormat))
 	if format == "" {
 		format = "wav"

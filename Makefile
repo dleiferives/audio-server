@@ -56,12 +56,7 @@ run: build
 		echo '  →   espeak-ng ready'; \
 	fi; \
 	if [ "$(OMNIVOICE)" = "1" ]; then \
-		echo '  →   launching audiocpp_server (omnivoice) on :$(OMNIVOICE_PORT)'; \
-		$(AUDIOCPP_BIN) --config $(AUDIOCPP_CFG) & echo $$! > $(PIDIR)/audiocpp-omni.pid; \
-	fi; \
-	if [ "$(OMNIVOICE)" = "1" ] && [ -f audio.cpp/supertonic-config.json ]; then \
-		echo '  →   launching audiocpp_server (supertonic) on :$(SUPERTONIC_PORT)'; \
-		$(AUDIOCPP_BIN) --config audio.cpp/supertonic-config.json & echo $$! > $(PIDIR)/audiocpp-supertonic.pid; \
+		echo '  →   GPU models managed by lifecycle (start on first request, idle after $(AUDIO_AUDIOCPP_IDLE_UNLOAD)s)'; \
 	fi; \
 	if [ "$(KOKORO)" = "1" ]; then \
 		echo '  →   launching kokoro sidecar on :$(KOKORO_PORT)'; \
@@ -72,16 +67,7 @@ run: build
 		./stt/fasterwhisper/server.py --port $(WHISPER_PORT) & echo $$! > $(PIDIR)/whisper.pid; \
 	fi; \
 	if [ "$(OMNIVOICE)" = "1" ]; then \
-		echo '  →   waiting for omnivoice...'; \
-		for i in $$(seq 1 30); do \
-			curl -sS http://127.0.0.1:$(OMNIVOICE_PORT)/health > /dev/null 2>&1 && break; \
-			sleep 1; \
-		done; \
-		echo '  →   waiting for supertonic...'; \
-		for i in $$(seq 1 30); do \
-			curl -sS http://127.0.0.1:$(SUPERTONIC_PORT)/health > /dev/null 2>&1 && break; \
-			sleep 1; \
-		done; \
+		echo '  →   skipping wait for lifecycle-managed GPU models'; \
 	fi; \
 	if [ "$(KOKORO)" = "1" ]; then \
 		echo '  →   waiting for kokoro...'; \
