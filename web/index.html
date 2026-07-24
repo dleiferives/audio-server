@@ -139,6 +139,23 @@ audio { width: 100%; margin-top: 10px; }
 
 <section>
   <h2>Speech-to-Text</h2>
+  <div class="row" style="margin-bottom:8px;">
+    <div>
+      <label>Provider</label>
+      <select id="stt-provider"></select>
+    </div>
+    <div>
+      <label>Language</label>
+      <select id="stt-language">
+        <option value="">Auto-detect</option>
+        <option value="en-US">English</option>
+        <option value="es-ES">Spanish</option>
+        <option value="fr-FR">French</option>
+        <option value="de-DE">German</option>
+        <option value="el-GR">Greek</option>
+      </select>
+    </div>
+  </div>
   <div class="row">
     <button id="stt-record" class="secondary">🎤 Record</button>
     <button id="stt-upload-trigger" class="secondary">📁 Upload file</button>
@@ -161,6 +178,7 @@ async function init() {
   renderProviders(health);
   renderLanguages(capabilities);
   renderVoices();
+  renderSttProviders(health);
 
   ttsProviderEl.onchange = () => { renderVoices(); renderProviderOpts(); };
   ttsLanguageEl.onchange = renderVoices;
@@ -170,6 +188,26 @@ async function init() {
   sttFileEl.onchange = doSttUpload;
   document.getElementById('align-submit').onclick = doAlign;
   loadAlignLanguages();
+}
+
+function renderSttProviders(health) {
+  const sel = document.getElementById('stt-provider');
+  sel.innerHTML = '';
+  const providers = health?.providers || {};
+  for (const [id, state] of Object.entries(providers)) {
+    if (id === 'faster-whisper' || id === 'nemotron') {
+      const opt = document.createElement('option');
+      opt.value = id;
+      opt.textContent = id + (state === 'ok' ? '' : ' (offline)');
+      sel.appendChild(opt);
+    }
+  }
+  if (!sel.children.length) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '(no STT providers)';
+    sel.appendChild(opt);
+  }
 }
 
 function renderStatus(health) {
@@ -438,6 +476,9 @@ async function doStt(blob, filename) {
   const fd = new FormData();
   fd.append('file', blob, filename);
   fd.append('response_format', 'json');
+  fd.append('model', document.getElementById('stt-provider').value || 'nemotron');
+  const lang = document.getElementById('stt-language').value;
+  if (lang) fd.append('language', lang);
 
   try {
     const r = await fetch(API + '/v1/audio/transcriptions', {
