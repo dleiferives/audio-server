@@ -1,0 +1,93 @@
+# MFA model registry for audio-server
+# Maps BCP-47 language codes to MFA acoustic model + dictionary names.
+# G2P model is optional (provides pronunciations for out-of-vocabulary words).
+
+models:
+  el:
+    acoustic: greek_cv
+    dictionary: greek_cv
+    g2p: mfa/models/greek_cv_g2p.zip
+  en:
+    acoustic: english_mfa
+    dictionary: english_us_arpa
+  fr:
+    acoustic: french_mfa
+    dictionary: french_mfa
+  de:
+    acoustic: german_mfa
+    dictionary: german_mfa
+  es:
+    acoustic: spanish_mfa
+    dictionary: spanish_spain_mfa
+  it:
+    acoustic: italian_mfa
+    dictionary: italian_mfa
+  pt:
+    acoustic: portuguese_mfa
+    dictionary: portuguese_mfa
+  ru:
+    acoustic: russian_mfa
+    dictionary: russian_mfa
+  ja:
+    acoustic: japanese_mfa
+    dictionary: japanese_mfa
+  ko:
+    acoustic: korean_mfa
+    dictionary: korean_mfa
+  zh:
+    acoustic: mandarin_mfa
+    dictionary: mandarin_mfa
+  tr:
+    acoustic: turkish_mfa
+    dictionary: turkish_mfa
+  uk:
+    acoustic: ukrainian_mfa
+    dictionary: ukrainian_mfa
+  bg:
+    acoustic: bulgarian_mfa
+    dictionary: bulgarian_mfa
+  cs:
+    acoustic: czech_mfa
+    dictionary: czech_mfa
+  hr:
+    acoustic: croatian_mfa
+    dictionary: croatian_mfa
+  pl:
+    acoustic: polish_mfa
+    dictionary: polish_mfa
+  sv:
+    acoustic: swedish_mfa
+    dictionary: swedish_mfa
+  th:
+    acoustic: thai_mfa
+    dictionary: thai_mfa
+  vi:
+    acoustic: vietnamese_mfa
+    dictionary: vietnamese_mfa
+  ha:
+    acoustic: hausa_mfa
+    dictionary: hausa_mfa
+  sw:
+    acoustic: swahili_mfa
+    dictionary: swahili_mfa
+  sr:
+    acoustic: serbocroatian_mfa
+    dictionary: serbocroatian_serbian_mfa
+  ro:
+    acoustic: romanian_cv
+    dictionary: romanian_cv
+  nl:
+    acoustic: dutch_cv
+    dictionary: dutch_cv
+  hu:
+    acoustic: hungarian_cv
+    dictionary: hungarian_cv
+  ka:
+    acoustic: georgian_cv
+    dictionary: georgian_cv
+  hy:
+    acoustic: armenian_cv
+    dictionary: armenian_cv
+  eu:
+    acoustic: basque_cv
+    dictionary: basque_cv

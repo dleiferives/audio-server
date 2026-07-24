@@ -3,6 +3,7 @@ ESPEAK        ?= 1
 OMNIVOICE     ?= 1
 KOKORO        ?= 0
 FASTERWHISPER ?= 0
+ALIGN         ?= 0
 
 # ── ports ──
 SERVER_PORT    ?= 8010
