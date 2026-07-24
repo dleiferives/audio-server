@@ -18,6 +18,7 @@ import (
 	"github.com/dleiferives/audio-server/internal/encode"
 	"github.com/dleiferives/audio-server/internal/lifecycle"
 	"github.com/dleiferives/audio-server/internal/provider"
+	"github.com/dleiferives/audio-server/internal/provider/align"
 	"github.com/dleiferives/audio-server/internal/provider/espeak"
 	"github.com/dleiferives/audio-server/internal/provider/fasterwhisper"
 	"github.com/dleiferives/audio-server/internal/provider/kokoro"
@@ -27,6 +28,8 @@ import (
 	"github.com/dleiferives/audio-server/internal/server"
 	"github.com/dleiferives/audio-server/internal/store"
 	"github.com/dleiferives/audio-server/internal/sttprovider"
+
+	"gopkg.in/yaml.v3"
 )
 
 func main() {
@@ -137,6 +140,13 @@ func main() {
 		log.Printf("audio store: %s (ttl=%s)", *audioStoreDir, time.Duration(*audioTTL)*time.Second)
 	}
 
+	var alignProvider server.Aligner
+	if envBool("AUDIO_ALIGN", false) {
+		langMap := loadAlignLanguages("mfa/models.yaml")
+		alignProvider = align.NewAlignProvider("mfa/env", "mfa/work", "mfa/bin", langMap)
+		log.Printf("alignment: enabled (%d languages)", len(langMap))
+	}
+
 	audioServer, err := server.New(server.Config{
 		Providers:       providers,
 		DefaultProvider: *defaultProvider,
@@ -148,6 +158,7 @@ func main() {
 		SttProviders:    sttProviders,
 		WebDir:          *webDir,
 		AudioStore:      audioStore,
+		AlignProvider:    alignProvider,
 	})
 	if err != nil {
 		log.Fatalf("audio server: %v", err)
@@ -199,6 +210,30 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func envBool(key string, fallback bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if value == "" {
+		return fallback
+	}
+	return value == "1" || value == "true" || value == "yes"
+}
+
+func loadAlignLanguages(path string) map[string]align.LanguageModel {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("alignment: could not read language config: %v", err)
+		return nil
+	}
+	var cfg struct {
+		Models map[string]align.LanguageModel `yaml:"models"`
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		log.Printf("alignment: invalid language config: %v", err)
+		return nil
+	}
+	return cfg.Models
 }
 
 func httpURL(addr string) string {

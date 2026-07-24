@@ -160,6 +160,7 @@ func New(cfg Config) (*Server, error) {
 		maxUploadBytes:     cfg.MaxUploadBytes,
 		webDir:             cfg.WebDir,
 		audioStore:         cfg.AudioStore,
+		alignProvider:      cfg.AlignProvider,
 	}, nil
 }
 
@@ -174,6 +175,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/audio/jobs/{id}/audio", s.auth(s.getJobAudio))
 	mux.HandleFunc("GET /v1/audio/jobs/{id}/stream", s.auth(s.getJobStream))
 	mux.HandleFunc("POST /v1/audio/transcriptions", s.auth(s.transcriptions))
+	if s.alignProvider != nil {
+		mux.HandleFunc("POST /v1/audio/alignments", s.auth(s.createAlignJob))
+		mux.HandleFunc("GET /v1/audio/alignments/{id}", s.auth(s.getAlignJob))
+		mux.HandleFunc("GET /v1/audio/alignments/{id}/result", s.auth(s.getAlignResult))
+		mux.HandleFunc("GET /v1/audio/alignments/models", s.auth(s.listAlignLanguages))
+	}
 	if s.webDir != "" {
 		fs := http.FileServer(http.Dir(s.webDir))
 		mux.Handle("GET /", fs)
