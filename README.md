@@ -9,6 +9,8 @@ A standalone audio manager service for TTS and STT. Exposes OpenAI-compatible sp
 | `espeak-ng` | local subprocess (TTS) | shipped |
 | `omnivoice` | HTTP sidecar (TTS, Python / GPU) | shipped, requires `AUDIO_OMNIVOICE_ADDR` |
 | `kokoro` | HTTP sidecar (TTS, Python / GPU or CPU) | shipped, requires `AUDIO_KOKORO_ADDR` |
+| `parakeet` | audio.cpp sidecar (STT, native CUDA/CPU) | shipped, configured as the default STT provider |
+| `nemotron` | audio.cpp sidecar (streaming-capable STT, native CUDA/CPU) | shipped |
 | `faster-whisper` | HTTP sidecar (STT, Python / GPU or CPU) | shipped, requires `AUDIO_FASTERWHISPER_ADDR` |
 
 ## Install runtime tools
@@ -74,7 +76,14 @@ curl -sS http://127.0.0.1:8010/v1/audio/transcriptions \
   -F language=en
 ```
 
-Requires `AUDIO_FASTERWHISPER_ADDR` to be set — see [`docs/providers.md`](docs/providers.md#speech-to-text-providers) and [`docs/api.md`](docs/api.md).
+The checked-in configuration uses Parakeet-TDT by default. Set `model=nemotron`
+or `model=faster-whisper` to select another configured STT provider.
+
+The web UI also supports a live microphone mode. Open
+`http://127.0.0.1:8010`, click **Start live mic**, and keep speaking. The
+browser captures mono PCM continuously and refreshes the cumulative Parakeet
+transcript about every three seconds; pressing **Stop live mic** sends one
+final snapshot.
 
 ## List voices
 
@@ -102,7 +111,7 @@ curl -sS http://127.0.0.1:8010/healthz
 
 | Variable | Default | Description |
 |---|---|---|
-| `AUDIO_ADDR` | `127.0.0.1:8010` | listen address |
+| `AUDIO_ADDR` | `0.0.0.0:8010` in `config.yml` | listen address |
 | `AUDIO_API_KEY` | _(empty)_ | optional bearer token |
 | `AUDIO_MAX_CONCURRENCY` | `2` | max concurrent synthesis processes |
 | `AUDIO_REQUEST_TIMEOUT_SECONDS` | `0` | per-request synthesis timeout (`0` disables the timeout) |
@@ -115,11 +124,18 @@ curl -sS http://127.0.0.1:8010/healthz
 | `AUDIO_OMNIVOICE_ADDR` | _(empty)_ | OmniVoice sidecar base URL, e.g. `http://127.0.0.1:8020`; provider disabled when blank |
 | `AUDIO_OMNIVOICE_CONCURRENCY` | `1` | concurrent OmniVoice workers — keep at 1 on a single GPU with limited VRAM |
 | `AUDIO_AUDIOCPP_IDLE_UNLOAD` | `600` | seconds an empty OmniVoice/Supertonic queue waits before the native sidecar is unloaded |
+| `AUDIO_DEFAULT_STT_PROVIDER` | `parakeet` in `config.yml` | provider used for `auto`, `whisper-1`, and a blank transcription model |
+| `AUDIO_PARAKEET_ADDR` | `http://127.0.0.1:8026` in `config.yml` | Parakeet-TDT audio.cpp sidecar base URL |
+| `AUDIO_NEMOTRON_ADDR` | `http://127.0.0.1:8024` in `config.yml` | Nemotron audio.cpp sidecar base URL |
 | `AUDIO_RESOURCE_SWITCH_DELAY_SECONDS` | `1` | quiet seconds after one audio.cpp provider finishes before another shared-GPU provider starts |
 | `AUDIO_KOKORO_ADDR` | _(empty)_ | Kokoro sidecar base URL, e.g. `http://127.0.0.1:8021`; provider disabled when blank |
 | `AUDIO_KOKORO_CONCURRENCY` | `1` | concurrent Kokoro workers |
 | `AUDIO_KOKORO_IDLE_UNLOAD_SECONDS` | `30` | seconds an empty Kokoro queue waits before the model is unloaded |
-| `AUDIO_FASTERWHISPER_ADDR` | _(empty)_ | faster-whisper sidecar base URL, e.g. `http://127.0.0.1:8030`; STT disabled when blank |
+| `AUDIO_FASTERWHISPER_ADDR` | `http://127.0.0.1:8030` in `config.yml` | lifecycle-managed faster-whisper sidecar URL |
+| `AUDIO_FASTERWHISPER_PYTHON` | project pyenv in `config.yml` | Python executable containing faster-whisper and CTranslate2 |
+| `AUDIO_FASTERWHISPER_MODEL_SIZE` | `large-v3` in `config.yml` | model downloaded and loaded on the first faster-whisper request |
+| `AUDIO_FASTERWHISPER_DEVICE` | `cuda` in `config.yml` | inference device |
+| `AUDIO_FASTERWHISPER_COMPUTE_TYPE` | `int8` in `config.yml` | quantization required for the 4 GB GPU |
 
 All flags are also available as CLI flags — run `./bin/audio-server -help` for the full list.
 
@@ -133,7 +149,16 @@ Used in place of Piper (issue #4), which doesn't run on the target hardware. See
 
 ## faster-whisper (STT)
 
-See [`docs/providers.md`](docs/providers.md#faster-whisper) for the sidecar provider and why STT doesn't go through the same job queue as TTS.
+Faster-whisper is started on demand by the shared GPU lifecycle manager. It
+stops the active audio.cpp sidecar before loading `large-v3` INT8, and is
+stopped in turn before another GPU provider starts. See
+[`docs/providers.md`](docs/providers.md#faster-whisper).
+
+## Parakeet-TDT (primary STT)
+
+Parakeet runs through the native `audio.cpp` lifecycle manager and is started
+on the first transcription request. Its server configuration is
+[`audiocpp-configs/parakeet.json`](audiocpp-configs/parakeet.json).
 
 ## Forced Alignment (MFA)
 

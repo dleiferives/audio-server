@@ -250,7 +250,7 @@ Fetch the result of a finished job. Same response headers as
 
 ### `POST /v1/audio/transcriptions`
 
-Speech-to-text, OpenAI-compatible: `multipart/form-data`, synchronous (no job queue involved — see `docs/providers.md` for why STT doesn't route through `internal/queue` the way TTS does). Returns `503` if no STT provider is configured (`AUDIO_FASTERWHISPER_ADDR` unset).
+Speech-to-text, OpenAI-compatible: `multipart/form-data`, synchronous (no job queue involved — see `docs/providers.md` for why STT doesn't route through `internal/queue` the way TTS does). Parakeet is the default provider in `config.yml`; the endpoint returns `503` if no STT provider is configured.
 
 ```bash
 curl -sS http://127.0.0.1:8010/v1/audio/transcriptions \
@@ -262,15 +262,28 @@ curl -sS http://127.0.0.1:8010/v1/audio/transcriptions \
 
 | Field | Required | Description |
 |---|---|---|
-| `file` | yes | Audio file. faster-whisper decodes most common containers/codecs directly — no need to pre-convert to WAV. |
-| `model` | no | Provider ID to use. `whisper-1`, `auto`, or blank map to the default STT provider. |
+| `file` | yes | Audio file. Parakeet expects a format supported by audio.cpp (WAV is recommended); faster-whisper also decodes common compressed containers. |
+| `model` | no | Provider ID (`parakeet`, `nemotron`, or `faster-whisper`). `whisper-1`, `auto`, or blank map to the configured default. |
 | `language` | no | ISO-639-1/BCP-47 language hint (e.g. `en`). Omit to let the model auto-detect. |
 | `response_format` | no | `json` (default, `{"text": "..."}`) or `text` (plain body). |
+| `stream` | no | `true` emits cumulative partial transcripts as server-sent events. Requires a streaming-capable provider such as Parakeet. |
 
 **Response 200**
 ```json
 { "text": "The quick brown fox jumps over the lazy dog." }
 ```
+
+**Streaming response**
+
+```bash
+curl -N http://127.0.0.1:8010/v1/audio/transcriptions \
+  -F file=@speech.wav \
+  -F model=parakeet \
+  -F stream=true
+```
+
+The response emits cumulative `transcript.text.delta` events, one
+`transcript.text.done` event, and `data: [DONE]`.
 
 | Status | Condition |
 |---|---|

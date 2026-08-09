@@ -24,6 +24,8 @@ import (
 	"github.com/dleiferives/audio-server/internal/provider/kokoro"
 	"github.com/dleiferives/audio-server/internal/provider/nemotron"
 	"github.com/dleiferives/audio-server/internal/provider/omnivoice"
+	"github.com/dleiferives/audio-server/internal/provider/parakeet"
+	"github.com/dleiferives/audio-server/internal/provider/qwen3asr"
 	"github.com/dleiferives/audio-server/internal/provider/supertonic"
 	"github.com/dleiferives/audio-server/internal/queue"
 	"github.com/dleiferives/audio-server/internal/server"
@@ -34,32 +36,46 @@ import (
 )
 
 type configFile struct {
-	Addr                       string `yaml:"addr"`
-	APIKey                     string `yaml:"api_key"`
-	WebDir                     string `yaml:"web_dir"`
-	AudioStoreDir              string `yaml:"audio_store_dir"`
-	AudioTTLSeconds            int    `yaml:"audio_ttl_seconds"`
-	MaxInputChars              int    `yaml:"max_input_chars"`
-	RequestTimeoutSeconds      int    `yaml:"request_timeout_seconds"`
-	MaxConcurrency             int    `yaml:"max_concurrency"`
-	EspeakPath                 string `yaml:"espeak_path"`
-	EspeakDefaultVoice         string `yaml:"espeak_default_voice"`
-	MP3Bitrate                 string `yaml:"mp3_bitrate"`
-	FFmpegPath                 string `yaml:"ffmpeg_path"`
-	OmnivoiceEnabled           bool   `yaml:"omnivoice_enabled"`
-	OmnivoiceAddr              string `yaml:"omnivoice_addr"`
-	OmnivoiceConcurrency       int    `yaml:"omnivoice_concurrency"`
-	SupertonicAddr             string `yaml:"supertonic_addr"`
-	AudiocppBin                string `yaml:"audiocpp_bin"`
-	AudiocppIdleUnloadSeconds  int    `yaml:"audiocpp_idle_unload_seconds"`
-	KokoroEnabled              bool   `yaml:"kokoro_enabled"`
-	FasterWhisperEnabled       bool   `yaml:"faster_whisper_enabled"`
-	STTEnabled                 bool   `yaml:"stt_enabled"`
-	NemotronAddr               string `yaml:"nemotron_addr"`
-	AlignEnabled               bool   `yaml:"align_enabled"`
-	AlignMFAEnv                string `yaml:"align_mfa_env"`
-	AlignMFAWorkDir            string `yaml:"align_mfa_work_dir"`
-	AlignMFAModelsConfig       string `yaml:"align_mfa_models_config"`
+	Addr                      string `yaml:"addr"`
+	APIKey                    string `yaml:"api_key"`
+	WebDir                    string `yaml:"web_dir"`
+	AudioStoreDir             string `yaml:"audio_store_dir"`
+	AudioTTLSeconds           int    `yaml:"audio_ttl_seconds"`
+	MaxInputChars             int    `yaml:"max_input_chars"`
+	RequestTimeoutSeconds     int    `yaml:"request_timeout_seconds"`
+	MaxConcurrency            int    `yaml:"max_concurrency"`
+	EspeakPath                string `yaml:"espeak_path"`
+	EspeakDefaultVoice        string `yaml:"espeak_default_voice"`
+	MP3Bitrate                string `yaml:"mp3_bitrate"`
+	FFmpegPath                string `yaml:"ffmpeg_path"`
+	OmnivoiceEnabled          bool   `yaml:"omnivoice_enabled"`
+	OmnivoiceAddr             string `yaml:"omnivoice_addr"`
+	OmnivoiceConcurrency      int    `yaml:"omnivoice_concurrency"`
+	SupertonicAddr            string `yaml:"supertonic_addr"`
+	AudiocppBin               string `yaml:"audiocpp_bin"`
+	AudiocppIdleUnloadSeconds int    `yaml:"audiocpp_idle_unload_seconds"`
+	KokoroEnabled             bool   `yaml:"kokoro_enabled"`
+	FasterWhisperEnabled      bool   `yaml:"faster_whisper_enabled"`
+	FasterWhisperAddr         string `yaml:"faster_whisper_addr"`
+	FasterWhisperPython       string `yaml:"faster_whisper_python"`
+	FasterWhisperScript       string `yaml:"faster_whisper_script"`
+	FasterWhisperPort         int    `yaml:"faster_whisper_port"`
+	FasterWhisperModelSize    string `yaml:"faster_whisper_model_size"`
+	FasterWhisperDevice       string `yaml:"faster_whisper_device"`
+	FasterWhisperComputeType  string `yaml:"faster_whisper_compute_type"`
+	STTEnabled                bool   `yaml:"stt_enabled"`
+	DefaultSttProvider        string `yaml:"default_stt_provider"`
+	ParakeetEnabled           bool   `yaml:"parakeet_enabled"`
+	ParakeetAddr              string `yaml:"parakeet_addr"`
+	NemotronAddr              string `yaml:"nemotron_addr"`
+	Qwen3ASR06Enabled         bool   `yaml:"qwen3_asr_0_6b_enabled"`
+	Qwen3ASR06Addr            string `yaml:"qwen3_asr_0_6b_addr"`
+	Qwen3ASR17Enabled         bool   `yaml:"qwen3_asr_1_7b_enabled"`
+	Qwen3ASR17Addr            string `yaml:"qwen3_asr_1_7b_addr"`
+	AlignEnabled              bool   `yaml:"align_enabled"`
+	AlignMFAEnv               string `yaml:"align_mfa_env"`
+	AlignMFAWorkDir           string `yaml:"align_mfa_work_dir"`
+	AlignMFAModelsConfig      string `yaml:"align_mfa_models_config"`
 }
 
 func loadConfig(path string) configFile {
@@ -97,8 +113,22 @@ func main() {
 	audiocppIdle := flag.Int("audiocpp-idle-unload-seconds", envInt("AUDIO_AUDIOCPP_IDLE_UNLOAD", cfg.AudiocppIdleUnloadSeconds), "seconds before unloading idle audiocpp_server instances")
 	kokoroEnabled := flag.Bool("kokoro-enabled", cfg.KokoroEnabled, "enable Kokoro TTS provider")
 	fasterWhisperEnabled := flag.Bool("faster-whisper-enabled", cfg.FasterWhisperEnabled, "enable faster-whisper STT provider")
-	sttEnabled := flag.Bool("stt-enabled", cfg.STTEnabled, "enable STT providers (Nemotron 3.5 ASR)")
-	nemotronAddr := flag.String("nemotron-addr", cfg.NemotronAddr, "Nemotron ASR sidecar base URL")
+	fasterWhisperAddr := flag.String("faster-whisper-addr", env("AUDIO_FASTERWHISPER_ADDR", valueOr(cfg.FasterWhisperAddr, "http://127.0.0.1:8030")), "faster-whisper sidecar base URL")
+	fasterWhisperPython := flag.String("faster-whisper-python", env("AUDIO_FASTERWHISPER_PYTHON", valueOr(cfg.FasterWhisperPython, "python3")), "Python executable for the faster-whisper sidecar")
+	fasterWhisperScript := flag.String("faster-whisper-script", env("AUDIO_FASTERWHISPER_SCRIPT", valueOr(cfg.FasterWhisperScript, "stt/fasterwhisper/server.py")), "path to the faster-whisper sidecar script")
+	fasterWhisperPort := flag.Int("faster-whisper-port", envInt("AUDIO_FASTERWHISPER_PORT", intOr(cfg.FasterWhisperPort, 8030)), "local faster-whisper sidecar port")
+	fasterWhisperModelSize := flag.String("faster-whisper-model-size", env("AUDIO_FASTERWHISPER_MODEL_SIZE", valueOr(cfg.FasterWhisperModelSize, "small")), "faster-whisper model size")
+	fasterWhisperDevice := flag.String("faster-whisper-device", env("AUDIO_FASTERWHISPER_DEVICE", valueOr(cfg.FasterWhisperDevice, "auto")), "faster-whisper inference device")
+	fasterWhisperComputeType := flag.String("faster-whisper-compute-type", env("AUDIO_FASTERWHISPER_COMPUTE_TYPE", valueOr(cfg.FasterWhisperComputeType, "default")), "faster-whisper compute type")
+	sttEnabled := flag.Bool("stt-enabled", cfg.STTEnabled, "enable audio.cpp STT providers")
+	defaultSttProvider := flag.String("default-stt-provider", env("AUDIO_DEFAULT_STT_PROVIDER", cfg.DefaultSttProvider), "provider used for auto, whisper-1, and blank transcription models")
+	parakeetEnabled := flag.Bool("parakeet-enabled", cfg.ParakeetEnabled, "enable Parakeet-TDT ASR provider")
+	parakeetAddr := flag.String("parakeet-addr", env("AUDIO_PARAKEET_ADDR", cfg.ParakeetAddr), "Parakeet-TDT ASR sidecar base URL")
+	nemotronAddr := flag.String("nemotron-addr", env("AUDIO_NEMOTRON_ADDR", cfg.NemotronAddr), "Nemotron ASR sidecar base URL")
+	qwen3ASR06Enabled := flag.Bool("qwen3-asr-0.6b-enabled", cfg.Qwen3ASR06Enabled, "enable Qwen3-ASR 0.6B provider")
+	qwen3ASR06Addr := flag.String("qwen3-asr-0.6b-addr", env("AUDIO_QWEN3_ASR_0_6B_ADDR", valueOr(cfg.Qwen3ASR06Addr, "http://127.0.0.1:8027")), "Qwen3-ASR 0.6B sidecar base URL")
+	qwen3ASR17Enabled := flag.Bool("qwen3-asr-1.7b-enabled", cfg.Qwen3ASR17Enabled, "enable Qwen3-ASR 1.7B provider")
+	qwen3ASR17Addr := flag.String("qwen3-asr-1.7b-addr", env("AUDIO_QWEN3_ASR_1_7B_ADDR", valueOr(cfg.Qwen3ASR17Addr, "http://127.0.0.1:8028")), "Qwen3-ASR 1.7B sidecar base URL")
 	webDir := flag.String("web-dir", env("AUDIO_WEB_DIR", cfg.WebDir), "optional path to static web frontend directory")
 	audioTTL := flag.Int("audio-ttl-seconds", envInt("AUDIO_AUDIO_TTL_SECONDS", cfg.AudioTTLSeconds), "audio file retention in seconds (0 = forever)")
 	audioStoreDir := flag.String("audio-store-dir", env("AUDIO_STORE_DIR", cfg.AudioStoreDir), "directory for generated audio files (empty = in-memory)")
@@ -114,12 +144,43 @@ func main() {
 	workers := map[string]int{espeakProvider.ID(): *maxConcurrency}
 
 	var gpuLifecycle *lifecycle.Manager
-	if strings.TrimSpace(*audiocppBin) != "" && strings.TrimSpace(*omnivoiceAddr) != "" {
+	if strings.TrimSpace(*audiocppBin) != "" || *fasterWhisperEnabled {
 		gpuLifecycle = lifecycle.NewManager(*audiocppBin)
-		gpuLifecycle.Register("omnivoice", "audio.cpp/omnivoice-server.json", 8020, time.Duration(*audiocppIdle)*time.Second)
-		gpuLifecycle.Register("supertonic", "audio.cpp/supertonic-config.json", 8022, time.Duration(*audiocppIdle)*time.Second)
-		if *sttEnabled && strings.TrimSpace(*nemotronAddr) != "" {
-			gpuLifecycle.Register("nemotron", "audio.cpp/nemotron-config.json", 8024, time.Duration(*audiocppIdle)*time.Second)
+		idleDelay := time.Duration(*audiocppIdle) * time.Second
+		if strings.TrimSpace(*audiocppBin) != "" && strings.TrimSpace(*omnivoiceAddr) != "" {
+			gpuLifecycle.Register("omnivoice", "audio.cpp/omnivoice-server.json", 8020, idleDelay)
+		}
+		if strings.TrimSpace(*audiocppBin) != "" && strings.TrimSpace(*supertonicAddr) != "" {
+			gpuLifecycle.Register("supertonic", "audio.cpp/supertonic-config.json", 8022, idleDelay)
+		}
+		if strings.TrimSpace(*audiocppBin) != "" && *sttEnabled && *parakeetEnabled && strings.TrimSpace(*parakeetAddr) != "" {
+			gpuLifecycle.Register("parakeet", "audiocpp-configs/parakeet.json", 8026, idleDelay)
+		}
+		if strings.TrimSpace(*audiocppBin) != "" && *sttEnabled && strings.TrimSpace(*nemotronAddr) != "" {
+			gpuLifecycle.Register("nemotron", "audio.cpp/nemotron-config.json", 8024, idleDelay)
+		}
+		if strings.TrimSpace(*audiocppBin) != "" && *qwen3ASR06Enabled {
+			gpuLifecycle.Register("qwen3-asr-0.6b", "audiocpp-configs/qwen3-asr-0.6b.json", 8027, idleDelay)
+		}
+		if strings.TrimSpace(*audiocppBin) != "" && *qwen3ASR17Enabled {
+			gpuLifecycle.Register("qwen3-asr-1.7b", "audiocpp-configs/qwen3-asr-1.7b.json", 8028, idleDelay)
+		}
+		if *fasterWhisperEnabled && strings.TrimSpace(*fasterWhisperPython) != "" && strings.TrimSpace(*fasterWhisperScript) != "" {
+			gpuLifecycle.RegisterCommand(
+				"faster-whisper",
+				*fasterWhisperPython,
+				[]string{
+					*fasterWhisperScript,
+					"--host", "127.0.0.1",
+					"--port", strconv.Itoa(*fasterWhisperPort),
+					"--model-size", *fasterWhisperModelSize,
+					"--device", *fasterWhisperDevice,
+					"--compute-type", *fasterWhisperComputeType,
+					"--idle-unload-seconds", "0",
+				},
+				strings.TrimRight(*fasterWhisperAddr, "/")+"/health",
+				idleDelay,
+			)
 		}
 	}
 
@@ -172,9 +233,19 @@ func main() {
 	})
 
 	var sttProviders []sttprovider.Provider
+	if *sttEnabled && *parakeetEnabled && strings.TrimSpace(*parakeetAddr) != "" {
+		pk := parakeet.New(*parakeetAddr, nil)
+		if gpuLifecycle != nil {
+			pk.StartFunc = func() error { return gpuLifecycle.Start("parakeet", true) }
+		}
+		sttProviders = append(sttProviders, pk)
+	}
 	if *fasterWhisperEnabled {
-		fwAddr := env("AUDIO_FASTERWHISPER_ADDR", "http://127.0.0.1:8030")
-		sttProviders = append(sttProviders, fasterwhisper.New(fwAddr, nil))
+		fw := fasterwhisper.New(*fasterWhisperAddr, nil)
+		if gpuLifecycle != nil && strings.TrimSpace(*fasterWhisperPython) != "" && strings.TrimSpace(*fasterWhisperScript) != "" {
+			fw.StartFunc = func() error { return gpuLifecycle.Start("faster-whisper", true) }
+		}
+		sttProviders = append(sttProviders, fw)
 	}
 	if *sttEnabled && strings.TrimSpace(*nemotronAddr) != "" {
 		nm := nemotron.New(*nemotronAddr, nil)
@@ -182,6 +253,20 @@ func main() {
 			nm.StartFunc = func() error { return gpuLifecycle.Start("nemotron", true) }
 		}
 		sttProviders = append(sttProviders, nm)
+	}
+	if *qwen3ASR06Enabled {
+		qw := qwen3asr.New("qwen3-asr-0.6b", "qwen3-asr-0.6b", *qwen3ASR06Addr, nil)
+		if gpuLifecycle != nil {
+			qw.StartFunc = func() error { return gpuLifecycle.Start("qwen3-asr-0.6b", true) }
+		}
+		sttProviders = append(sttProviders, qw)
+	}
+	if *qwen3ASR17Enabled {
+		qw := qwen3asr.New("qwen3-asr-1.7b", "qwen3-asr-1.7b", *qwen3ASR17Addr, nil)
+		if gpuLifecycle != nil {
+			qw.StartFunc = func() error { return gpuLifecycle.Start("qwen3-asr-1.7b", true) }
+		}
+		sttProviders = append(sttProviders, qw)
 	}
 
 	var audioStore *store.Store
@@ -202,17 +287,18 @@ func main() {
 	}
 
 	audioServer, err := server.New(server.Config{
-		Providers:       providers,
-		DefaultProvider: *defaultProvider,
-		APIKey:          *apiKey,
-		MaxInputChars:   *maxInputChars,
-		RequestTimeout:  requestTimeout,
-		Queue:           jobQueue,
-		StreamWorkers:   workers,
-		SttProviders:    sttProviders,
-		WebDir:          *webDir,
-		AudioStore:      audioStore,
-		AlignProvider:   alignProvider,
+		Providers:          providers,
+		DefaultProvider:    *defaultProvider,
+		APIKey:             *apiKey,
+		MaxInputChars:      *maxInputChars,
+		RequestTimeout:     requestTimeout,
+		Queue:              jobQueue,
+		StreamWorkers:      workers,
+		SttProviders:       sttProviders,
+		DefaultSttProvider: *defaultSttProvider,
+		WebDir:             *webDir,
+		AudioStore:         audioStore,
+		AlignProvider:      alignProvider,
 	})
 	if err != nil {
 		log.Fatalf("audio server: %v", err)
@@ -264,6 +350,20 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func valueOr(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
+func intOr(value, fallback int) int {
+	if value == 0 {
+		return fallback
+	}
+	return value
 }
 
 func loadAlignLanguages(path string) map[string]align.LanguageModel {

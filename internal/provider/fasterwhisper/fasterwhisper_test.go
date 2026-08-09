@@ -72,6 +72,68 @@ func TestTranscribeSendsAudioAndLanguage(t *testing.T) {
 	}
 }
 
+func TestTranscribeNormalizesBrowserLocale(t *testing.T) {
+	var gotLanguage string
+	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
+		gotLanguage = req.URL.Query().Get("language")
+		return jsonResponse(200, `{"text":"γεια","language":"el","duration":1}`), nil
+	}})
+
+	_, err := p.Transcribe(context.Background(), sttprovider.TranscriptionRequest{
+		Audio:    []byte("fake-wav-bytes"),
+		Language: "el-GR",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotLanguage != "el" {
+		t.Fatalf("expected normalized language el, got %q", gotLanguage)
+	}
+}
+
+func TestTranscribeStartsLifecycleManagedSidecar(t *testing.T) {
+	starts := 0
+	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
+		return jsonResponse(200, `{"text":"hello","language":"en","duration":1}`), nil
+	}})
+	p.StartFunc = func() error {
+		starts++
+		return nil
+	}
+
+	if !p.StartsOnDemand() {
+		t.Fatal("expected provider to report on-demand startup")
+	}
+	if _, err := p.Transcribe(context.Background(), sttprovider.TranscriptionRequest{Audio: []byte("wav")}); err != nil {
+		t.Fatal(err)
+	}
+	if starts != 1 {
+		t.Fatalf("expected one lifecycle start, got %d", starts)
+	}
+}
+
+func TestTranscribeStreamEmitsBufferedResult(t *testing.T) {
+	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
+		return jsonResponse(200, `{"text":"hello world","language":"en","duration":1.5}`), nil
+	}})
+
+	var partial sttprovider.TranscriptionResult
+	result, err := p.TranscribeStream(
+		context.Background(),
+		sttprovider.TranscriptionRequest{Audio: []byte("wav")},
+		func(got sttprovider.TranscriptionResult) error {
+			partial = got
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if partial.Text != "hello world" || result.Text != "hello world" {
+		t.Fatalf("unexpected partial=%+v result=%+v", partial, result)
+	}
+}
+
 func TestTranscribeRejectsEmptyAudio(t *testing.T) {
 	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
 		t.Fatal("should not call sidecar")

@@ -42,6 +42,10 @@ func (p Provider) ID() string {
 	return id
 }
 
+func (p Provider) StartsOnDemand() bool {
+	return p.StartFunc != nil
+}
+
 func (p Provider) Health(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.BaseURL+"/health", nil)
 	if err != nil {

@@ -2,7 +2,6 @@
 ESPEAK        ?= 1
 OMNIVOICE     ?= 1
 KOKORO        ?= 0
-FASTERWHISPER ?= 0
 ALIGN         ?= 0
 
 # ── ports ──
@@ -11,7 +10,6 @@ OMNIVOICE_PORT ?= 8020
 SUPERTONIC_PORT ?= 8022
 KOKORO_PORT    ?= 8021
 NEMOTRON_PORT  ?= 8024
-WHISPER_PORT   ?= 8030
 
 # ── frontend ──
 WEB_DIR ?= $(CURDIR)/web
@@ -64,24 +62,13 @@ run: build
 		echo '  →   launching kokoro sidecar on :$(KOKORO_PORT)'; \
 		./tts/kokoro/server.py --port $(KOKORO_PORT) & echo $$! > $(PIDIR)/kokoro.pid; \
 	fi; \
-	if [ "$(FASTERWHISPER)" = "1" ]; then \
-		echo '  →   launching faster-whisper sidecar on :$(WHISPER_PORT)'; \
-		./stt/fasterwhisper/server.py --port $(WHISPER_PORT) & echo $$! > $(PIDIR)/whisper.pid; \
-	fi; \
 	if [ "$(OMNIVOICE)" = "1" ]; then \
-		echo '  →   skipping wait for lifecycle-managed GPU models'; \
+		echo '  →   skipping wait for lifecycle-managed GPU models (including faster-whisper)'; \
 	fi; \
 	if [ "$(KOKORO)" = "1" ]; then \
 		echo '  →   waiting for kokoro...'; \
 		for i in $$(seq 1 20); do \
 			curl -sS http://127.0.0.1:$(KOKORO_PORT)/health > /dev/null 2>&1 && break; \
-			sleep 0.5; \
-		done; \
-	fi; \
-	if [ "$(FASTERWHISPER)" = "1" ]; then \
-		echo '  →   waiting for faster-whisper...'; \
-		for i in $$(seq 1 20); do \
-			curl -sS http://127.0.0.1:$(WHISPER_PORT)/health > /dev/null 2>&1 && break; \
 			sleep 0.5; \
 		done; \
 	fi; \

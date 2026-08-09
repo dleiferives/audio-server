@@ -157,7 +157,7 @@ audio { width: 100%; margin-top: 10px; }
     </div>
   </div>
   <div class="row">
-    <button id="stt-record" class="secondary">🎤 Record</button>
+    <button id="stt-record" class="secondary">🎤 Start live mic</button>
     <button id="stt-upload-trigger" class="secondary">📁 Upload file</button>
   </div>
   <input type="file" id="stt-file" accept="audio/*" hidden>
@@ -195,12 +195,15 @@ function renderSttProviders(health) {
   sel.innerHTML = '';
   const providers = health?.providers || {};
   for (const [id, state] of Object.entries(providers)) {
-    if (id === 'faster-whisper' || id === 'nemotron') {
+    if (id === 'faster-whisper' || id === 'parakeet' || id === 'nemotron' || id.startsWith('qwen3-asr-')) {
       const opt = document.createElement('option');
       opt.value = id;
-      opt.textContent = id + (state === 'ok' ? '' : ' (offline)');
+      opt.textContent = id + (state === 'ok' ? '' : state === 'cold' ? ' (cold; starts on request)' : ' (offline)');
       sel.appendChild(opt);
     }
+  }
+  if ([...sel.options].some(opt => opt.value === 'parakeet')) {
+    sel.value = 'parakeet';
   }
   if (!sel.children.length) {
     const opt = document.createElement('option');
@@ -228,7 +231,7 @@ function renderProviders(health) {
   const providers = health?.providers || {};
   for (const [id, state] of Object.entries(providers)) {
     // Skip STT providers
-    if (id === 'faster-whisper') continue;
+    if (id === 'faster-whisper' || id === 'parakeet' || id === 'nemotron' || id.startsWith('qwen3-asr-')) continue;
     const opt = document.createElement('option');
     opt.value = id;
     opt.textContent = id + (state === 'ok' ? '' : state === 'cold' ? ' (cold; starts on request)' : ' (down)');
@@ -430,33 +433,282 @@ function renderAudio(wavBuffer, label) {
   ttsOutputEl.appendChild(download);
 }
 
-let mediaRecorder, audioChunks;
+let liveMicSession = null;
+const LIVE_TRANSCRIPTION_INTERVAL_MS = 3000;
+const LIVE_TRANSCRIPTION_SAMPLE_RATE = 16000;
 const sttStatusEl = document.getElementById('stt-status');
 const sttOutputEl = document.getElementById('stt-output');
 
 async function toggleRecord() {
   const btn = document.getElementById('stt-record');
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
-    mediaRecorder.stop();
+  if (liveMicSession?.recording) {
+    stopLiveMic();
     return;
   }
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    mediaRecorder = new MediaRecorder(stream);
-    audioChunks = [];
-    mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
-    mediaRecorder.onstop = () => {
-      stream.getTracks().forEach(t => t.stop());
-      const blob = new Blob(audioChunks, { type: 'audio/webm' });
-      doStt(blob, 'recording.webm');
+    btn.disabled = true;
+    sttOutputEl.textContent = '';
+    sttStatusEl.textContent = 'Requesting microphone access...';
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+    const context = new AudioContext();
+    await context.resume();
+    const source = context.createMediaStreamSource(stream);
+    const gain = context.createGain();
+    gain.gain.value = 0;
+
+    const session = {
+      stream,
+      context,
+      source,
+      gain,
+      recorder: null,
+      chunks: [],
+      sampleCount: 0,
+      recording: true,
+      inFlight: false,
+      pending: false,
+      finalRequested: false,
+      finalCompleted: false,
+      lastSentSamples: 0,
+      timer: null,
     };
-    mediaRecorder.start();
+    liveMicSession = session;
+    const receiveChunk = chunk => {
+      if (!(chunk instanceof Float32Array) || chunk.length === 0) return;
+      session.chunks.push(chunk);
+      session.sampleCount += chunk.length;
+    };
+
+    if (context.audioWorklet) {
+      await context.audioWorklet.addModule(API + '/pcm-recorder-worklet.js');
+      const recorder = new AudioWorkletNode(context, 'pcm-recorder');
+      recorder.port.onmessage = event => receiveChunk(event.data);
+      source.connect(recorder);
+      recorder.connect(gain);
+      session.recorder = recorder;
+    } else {
+      const recorder = context.createScriptProcessor(4096, 1, 1);
+      recorder.onaudioprocess = event => receiveChunk(new Float32Array(event.inputBuffer.getChannelData(0)));
+      source.connect(recorder);
+      recorder.connect(gain);
+      session.recorder = recorder;
+    }
+    gain.connect(context.destination);
+    session.timer = setInterval(() => transcribeLiveSnapshot(session), LIVE_TRANSCRIPTION_INTERVAL_MS);
+
     btn.classList.add('recording');
-    btn.textContent = '⏹ Stop';
-    sttStatusEl.textContent = 'Recording...';
+    btn.textContent = '⏹ Stop live mic';
+    btn.disabled = false;
+    sttStatusEl.textContent = 'Listening… transcript updates every few seconds';
   } catch (e) {
-    sttStatusEl.textContent = 'Mic access denied';
+    if (liveMicSession) cleanupLiveMic(liveMicSession);
+    liveMicSession = null;
+    btn.disabled = false;
+    btn.classList.remove('recording');
+    btn.textContent = '🎤 Start live mic';
+    sttStatusEl.textContent = `Microphone unavailable: ${e.message}`;
   }
+}
+
+function stopLiveMic() {
+  const session = liveMicSession;
+  if (!session || !session.recording) return;
+  session.recording = false;
+  session.finalRequested = true;
+  clearInterval(session.timer);
+  if (session.recorder?.port) session.recorder.port.postMessage('flush');
+  session.stream.getTracks().forEach(track => track.stop());
+  session.source.disconnect();
+  session.recorder.disconnect();
+  session.gain.disconnect();
+  setTimeout(() => session.context.close(), 100);
+
+  const btn = document.getElementById('stt-record');
+  btn.disabled = true;
+  btn.classList.remove('recording');
+  btn.textContent = 'Finalizing…';
+  sttStatusEl.textContent = 'Finishing transcript…';
+  setTimeout(() => transcribeLiveSnapshot(session, true), 50);
+}
+
+function cleanupLiveMic(session) {
+  clearInterval(session.timer);
+  session.stream?.getTracks().forEach(track => track.stop());
+  try { session.source?.disconnect(); } catch {}
+  try { session.recorder?.disconnect(); } catch {}
+  try { session.gain?.disconnect(); } catch {}
+  if (session.context && session.context.state !== 'closed') session.context.close();
+}
+
+async function transcribeLiveSnapshot(session, final = false) {
+  if (session !== liveMicSession) return;
+  if (final) session.finalRequested = true;
+  if (session.inFlight) {
+    session.pending = true;
+    return;
+  }
+  if (session.sampleCount === 0) {
+    if (session.finalRequested) finishLiveMic(session);
+    return;
+  }
+  if (!session.finalRequested && session.sampleCount === session.lastSentSamples) return;
+
+  const sentAsFinal = session.finalRequested && !session.recording;
+  const sentSamples = session.sampleCount;
+  const wav = encodeLiveWav(session.chunks, sentSamples, session.context.sampleRate);
+  session.lastSentSamples = sentSamples;
+  session.inFlight = true;
+  session.pending = false;
+
+  const seconds = sentSamples / session.context.sampleRate;
+  sttStatusEl.textContent = session.recording
+    ? `Listening… transcribing ${seconds.toFixed(1)}s`
+    : 'Finishing transcript…';
+
+  const fd = new FormData();
+  fd.append('file', wav, 'live-microphone.wav');
+  fd.append('response_format', 'json');
+  fd.append('model', document.getElementById('stt-provider').value || 'auto');
+  fd.append('stream', 'true');
+  const language = document.getElementById('stt-language').value;
+  if (language) fd.append('language', language);
+
+  try {
+    const response = await fetch(API + '/v1/audio/transcriptions', { method: 'POST', body: fd });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: response.statusText }));
+      throw new Error(error.error || response.statusText);
+    }
+    const result = await readTranscriptionEvents(response, partial => {
+      sttOutputEl.textContent = partial;
+    });
+    sttOutputEl.textContent = result.text || '';
+    sttStatusEl.textContent = session.recording
+      ? `Listening… updated from ${seconds.toFixed(1)}s of audio`
+      : 'Done';
+  } catch (e) {
+    sttStatusEl.textContent = session.recording
+      ? `Listening… transcription retrying (${e.message})`
+      : `Transcription failed: ${e.message}`;
+  } finally {
+    session.inFlight = false;
+    if (sentAsFinal) session.finalCompleted = true;
+    if (session.finalRequested && !session.finalCompleted) {
+      transcribeLiveSnapshot(session, true);
+    } else if (session.pending && session.recording) {
+      transcribeLiveSnapshot(session);
+    } else if (session.finalCompleted) {
+      finishLiveMic(session);
+    }
+  }
+}
+
+async function readTranscriptionEvents(response, onPartial) {
+  if (!response.body) throw new Error('Streaming response body is unavailable');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let finalText = '';
+
+  const consumeBlock = block => {
+    const data = block.split(/\r?\n/)
+      .filter(line => line.startsWith('data:'))
+      .map(line => line.slice(5).trim())
+      .join('\n');
+    if (!data || data === '[DONE]') return;
+    const event = JSON.parse(data);
+    if (event.type === 'transcript.text.delta') {
+      finalText = event.delta || finalText;
+      onPartial(finalText);
+    } else if (event.type === 'transcript.text.done') {
+      finalText = event.text || finalText;
+      onPartial(finalText);
+    } else if (event.type === 'error') {
+      throw new Error(event.error?.message || 'Streaming transcription failed');
+    }
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    let boundary;
+    while ((boundary = buffer.search(/\r?\n\r?\n/)) >= 0) {
+      const block = buffer.slice(0, boundary);
+      const separator = buffer.slice(boundary).match(/^\r?\n\r?\n/)[0];
+      buffer = buffer.slice(boundary + separator.length);
+      consumeBlock(block);
+    }
+    if (done) break;
+  }
+  if (buffer.trim()) consumeBlock(buffer);
+  return { text: finalText };
+}
+
+function finishLiveMic(session) {
+  if (session !== liveMicSession) return;
+  cleanupLiveMic(session);
+  liveMicSession = null;
+  const btn = document.getElementById('stt-record');
+  btn.disabled = false;
+  btn.classList.remove('recording');
+  btn.textContent = '🎤 Start live mic';
+  sttFileEl.value = '';
+}
+
+function encodeLiveWav(chunks, sampleCount, inputRate) {
+  const input = new Float32Array(sampleCount);
+  let offset = 0;
+  for (const chunk of chunks) {
+    const count = Math.min(chunk.length, sampleCount - offset);
+    if (count <= 0) break;
+    input.set(chunk.subarray(0, count), offset);
+    offset += count;
+  }
+  const samples = resampleLinear(input, inputRate, LIVE_TRANSCRIPTION_SAMPLE_RATE);
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+  const writeText = (at, text) => {
+    for (let i = 0; i < text.length; i++) view.setUint8(at + i, text.charCodeAt(i));
+  };
+  writeText(0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeText(8, 'WAVE');
+  writeText(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, LIVE_TRANSCRIPTION_SAMPLE_RATE, true);
+  view.setUint32(28, LIVE_TRANSCRIPTION_SAMPLE_RATE * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeText(36, 'data');
+  view.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const sample = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(44 + i * 2, sample < 0 ? sample * 32768 : sample * 32767, true);
+  }
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+function resampleLinear(input, inputRate, outputRate) {
+  if (inputRate === outputRate) return input;
+  const output = new Float32Array(Math.max(1, Math.round(input.length * outputRate / inputRate)));
+  const ratio = inputRate / outputRate;
+  for (let i = 0; i < output.length; i++) {
+    const position = i * ratio;
+    const left = Math.floor(position);
+    const right = Math.min(left + 1, input.length - 1);
+    const mix = position - left;
+    output[i] = input[left] * (1 - mix) + input[right] * mix;
+  }
+  return output;
 }
 
 function doSttUpload() {
@@ -476,7 +728,7 @@ async function doStt(blob, filename) {
   const fd = new FormData();
   fd.append('file', blob, filename);
   fd.append('response_format', 'json');
-  fd.append('model', document.getElementById('stt-provider').value || 'nemotron');
+  fd.append('model', document.getElementById('stt-provider').value || 'auto');
   const lang = document.getElementById('stt-language').value;
   if (lang) fd.append('language', lang);
 
@@ -489,14 +741,14 @@ async function doStt(blob, filename) {
       throw new Error(err.error);
     }
     const data = await r.json();
-    sttOutputEl.innerHTML = `<pre>${data.text}</pre>`;
+    sttOutputEl.textContent = data.text;
     sttStatusEl.textContent = 'Done';
   } catch (e) {
-    sttOutputEl.innerHTML = `<pre>Error: ${e.message}</pre>`;
+    sttOutputEl.textContent = `Error: ${e.message}`;
     sttStatusEl.textContent = 'Failed';
   }
   btn.disabled = false;
-  btn.textContent = '🎤 Record';
+  btn.textContent = '🎤 Start live mic';
   sttFileEl.value = '';
 }
 

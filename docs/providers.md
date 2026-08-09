@@ -183,6 +183,29 @@ It's intentionally not `provider.Provider` — the request/result shapes differ 
 
 Registered via `server.Config.SttProviders` / `DefaultSttProvider` — entirely optional; `POST /v1/audio/transcriptions` returns `503` if none are configured.
 
+### Parakeet-TDT
+
+**ID:** `parakeet`
+**Package:** `internal/provider/parakeet`
+**Runtime:** `audio.cpp` (`audiocpp-configs/parakeet.json`)
+
+Parakeet-TDT 0.6B v3 is the default STT provider in `config.yml`. It supports
+25 European languages with automatic language detection. The lifecycle manager
+starts its CUDA sidecar on the first request and treats it as exclusive with
+the other `audio.cpp` GPU models. The checked-in sidecar configuration uses
+Q8_0 matrix weights and buffered streaming with 2-second center and right-
+context windows. `stream=true` exposes its cumulative partial transcripts as
+SSE.
+
+The browser's live microphone mode captures PCM continuously and submits a
+rolling cumulative WAV snapshot every three seconds. Each snapshot uses the
+native Parakeet streaming session and its partial events. This rolling approach
+is necessary because `audiocpp_server` currently buffers an HTTP upload before
+starting inference; it does not yet accept an indefinitely open audio body.
+
+Use `AUDIO_DEFAULT_STT_PROVIDER=nemotron` to make Nemotron the default without
+removing Parakeet, or send `model=nemotron` on an individual request.
+
 ### faster-whisper
 
 **ID:** `faster-whisper`  
@@ -192,14 +215,25 @@ Registered via `server.Config.SttProviders` / `DefaultSttProvider` — entirely 
 
 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2-based Whisper reimplementation) transcribes audio to text, with automatic language detection if `language` isn't given. The sidecar accepts raw audio bytes directly (no need to specify the format — it decodes via the same machinery Whisper/ffmpeg use internally, so WAV/MP3/etc. all work without pre-conversion).
 
-Enable it with `AUDIO_FASTERWHISPER_ADDR` (or `-faster-whisper-addr`), e.g. `http://127.0.0.1:8030`. Run the sidecar independently:
+The checked-in configuration enables it at `http://127.0.0.1:8030` with
+`large-v3`, CUDA, and INT8 quantization. The Go server launches the Python
+sidecar on the first request and stops every other registered GPU process
+beforehand. Run the sidecar independently only for development:
 
 ```bash
 pip install faster-whisper torch
-./stt/fasterwhisper/server.py --port 8030 --model-size small
+./stt/fasterwhisper/server.py --port 8030 --model-size large-v3 --device cuda --compute-type int8
 ```
 
-**Model lifecycle, and why it's different from the TTS sidecars:** since there's no Go-orchestrated queue driving this provider (see above), the sidecar manages its own idle-unload timer internally — it loads the model lazily on first `/transcribe` call and unloads it after `--idle-unload-seconds` (default 60s, resettable via `FASTERWHISPER_IDLE_UNLOAD_SECONDS`) of no requests, resetting the timer on every transcription. `POST /load` / `POST /unload` are still exposed on the sidecar (same shape as the TTS sidecars) so a future queue-based integration could drive it explicitly instead.
+**Model lifecycle:** the Go lifecycle manager owns the sidecar process and
+places it in the same exclusive GPU group as OmniVoice, Supertonic, Parakeet,
+and Nemotron. Its internal idle unload is disabled in managed mode; stopping
+the process releases both the model and CTranslate2 CUDA allocations. In
+standalone mode, the sidecar retains its own 60-second idle-unload default.
+
+The sidecar itself returns a buffered transcription. The Go provider adapts
+that result to the streaming SSE contract, allowing the web UI's cumulative
+three-second microphone snapshots to update normally.
 
 ## Adding a provider
 

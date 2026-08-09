@@ -13,15 +13,18 @@ import (
 
 type Manager struct {
 	BinaryPath string
+	startMu    sync.Mutex
 	mu         sync.Mutex
 	instances  map[string]*instance
 }
 
 type instance struct {
-	name        string
-	configPath  string
-	port        int
-	idleTimeout time.Duration
+	name           string
+	binaryPath     string
+	args           []string
+	healthURL      string
+	idleTimeout    time.Duration
+	watcherStarted bool
 
 	mu       sync.Mutex
 	cmd      *exec.Cmd
@@ -37,12 +40,26 @@ func NewManager(binaryPath string) *Manager {
 }
 
 func (m *Manager) Register(name, configPath string, port int, idleTimeout time.Duration) {
+	m.RegisterCommand(
+		name,
+		m.BinaryPath,
+		[]string{"--config", configPath},
+		fmt.Sprintf("http://127.0.0.1:%d/health", port),
+		idleTimeout,
+	)
+}
+
+// RegisterCommand registers an arbitrary sidecar process in the shared
+// lifecycle group. Starting it exclusively stops every other registered
+// process first, which lets native and Python GPU providers share VRAM.
+func (m *Manager) RegisterCommand(name, binaryPath string, args []string, healthURL string, idleTimeout time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.instances[name] = &instance{
 		name:        name,
-		configPath:  configPath,
-		port:        port,
+		binaryPath:  binaryPath,
+		args:        append([]string(nil), args...),
+		healthURL:   healthURL,
 		idleTimeout: idleTimeout,
 		stopCh:      make(chan struct{}),
 	}
@@ -51,6 +68,9 @@ func (m *Manager) Register(name, configPath string, port int, idleTimeout time.D
 // Start starts the named instance. If exclusive is true, all other running
 // instances are stopped first (for shared GPU VRAM scenarios).
 func (m *Manager) Start(name string, exclusive bool) error {
+	m.startMu.Lock()
+	defer m.startMu.Unlock()
+
 	m.mu.Lock()
 	inst, ok := m.instances[name]
 	m.mu.Unlock()
@@ -70,8 +90,8 @@ func (m *Manager) Start(name string, exclusive bool) error {
 		m.stopOthersLocked(name)
 	}
 
-	log.Printf("lifecycle: starting %s on port %d", inst.name, inst.port)
-	cmd := exec.Command(m.BinaryPath, "--config", inst.configPath)
+	log.Printf("lifecycle: starting %s", inst.name)
+	cmd := exec.Command(inst.binaryPath, inst.args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -82,12 +102,14 @@ func (m *Manager) Start(name string, exclusive bool) error {
 	inst.lastUsed = time.Now()
 
 	// Wait for server to become healthy
-	healthURL := fmt.Sprintf("http://127.0.0.1:%d/health", inst.port)
 	deadline := time.Now().Add(30 * time.Second)
+	healthClient := &http.Client{Timeout: 2 * time.Second}
+	healthy := false
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(healthURL)
+		resp, err := healthClient.Get(inst.healthURL)
 		if err == nil && resp.StatusCode == 200 {
 			resp.Body.Close()
+			healthy = true
 			break
 		}
 		if resp != nil {
@@ -95,8 +117,13 @@ func (m *Manager) Start(name string, exclusive bool) error {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+	if !healthy {
+		inst.stopLocked()
+		return fmt.Errorf("lifecycle %s start: health check timed out", inst.name)
+	}
 
-	if inst.idleTimeout > 0 {
+	if inst.idleTimeout > 0 && !inst.watcherStarted {
+		inst.watcherStarted = true
 		go m.idleWatcher(inst)
 	}
 	return nil
@@ -126,6 +153,8 @@ func (m *Manager) stopOthersLocked(exclude string) {
 }
 
 func (m *Manager) StopAll() {
+	m.startMu.Lock()
+	defer m.startMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, inst := range m.instances {
@@ -140,7 +169,7 @@ func (inst *instance) stopLocked() {
 	if inst.cmd == nil || inst.cmd.Process == nil {
 		return
 	}
-	log.Printf("lifecycle: stopping %s (idle)", inst.name)
+	log.Printf("lifecycle: stopping %s", inst.name)
 	pgid, _ := syscall.Getpgid(inst.cmd.Process.Pid)
 	syscall.Kill(-pgid, syscall.SIGTERM)
 	inst.cmd.Wait()

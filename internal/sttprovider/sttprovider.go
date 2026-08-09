@@ -35,3 +35,17 @@ type Provider interface {
 	Health(ctx context.Context) error
 	Transcribe(ctx context.Context, req TranscriptionRequest) (TranscriptionResult, error)
 }
+
+// StreamingProvider emits cumulative partial transcription snapshots while a
+// request is being decoded, then returns the final result.
+type StreamingProvider interface {
+	TranscribeStream(ctx context.Context, req TranscriptionRequest, onPartial func(TranscriptionResult) error) (TranscriptionResult, error)
+}
+
+// OnDemandProvider is implemented by providers whose sidecar is intentionally
+// stopped while idle and started by Transcribe. Health checks report an
+// unreachable on-demand provider as cold rather than making the whole service
+// unhealthy.
+type OnDemandProvider interface {
+	StartsOnDemand() bool
+}

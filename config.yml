@@ -1,5 +1,5 @@
 # ── server ──
-addr: "127.0.0.1:8010"
+addr: "0.0.0.0:8010"
 api_key: ""
 web_dir: "web"
 
@@ -24,9 +24,16 @@ supertonic_addr: "http://127.0.0.1:8022"
 audiocpp_bin: "audio.cpp/build/linux-cuda-release/bin/audiocpp_server"
 audiocpp_idle_unload_seconds: 600
 
-# ── STT (Nemotron 3.5 ASR via audio.cpp) ──
+# ── STT (audio.cpp) ──
 stt_enabled: true
+default_stt_provider: "parakeet"
+parakeet_enabled: true
+parakeet_addr: "http://127.0.0.1:8026"
 nemotron_addr: "http://127.0.0.1:8024"
+qwen3_asr_0_6b_enabled: true
+qwen3_asr_0_6b_addr: "http://127.0.0.1:8027"
+qwen3_asr_1_7b_enabled: true
+qwen3_asr_1_7b_addr: "http://127.0.0.1:8028"
 
 # ── alignment (MFA) ──
 align_enabled: true
@@ -36,4 +43,13 @@ align_mfa_models_config: "mfa/models.yaml"
 
 # ── disabled providers ──
 kokoro_enabled: false
-faster_whisper_enabled: false
+
+# ── faster-whisper (shared GPU lifecycle) ──
+faster_whisper_enabled: true
+faster_whisper_addr: "http://127.0.0.1:8030"
+faster_whisper_python: "/home/dleiferives/.pyenv/versions/audio-server/bin/python"
+faster_whisper_script: "stt/fasterwhisper/server.py"
+faster_whisper_port: 8030
+faster_whisper_model_size: "large-v3"
+faster_whisper_device: "cuda"
+faster_whisper_compute_type: "int8"

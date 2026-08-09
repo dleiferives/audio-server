@@ -193,6 +193,30 @@ func TestHealthReportsColdLifecycleProviderAsConfigured(t *testing.T) {
 	}
 }
 
+func TestHealthReportsColdOnDemandSttProviderAsConfigured(t *testing.T) {
+	stt := fakeSttProvider{
+		id:        "parakeet",
+		healthErr: sttprovider.ErrUnavailable,
+		onDemand:  true,
+	}
+	s := newTestServer(t, fakeProvider{}, Config{SttProviders: []sttprovider.Provider{stt}})
+	resp := request(t, s, http.MethodGet, "/healthz", "", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for a cold on-demand STT provider", resp.StatusCode)
+	}
+	var body struct {
+		Status    string            `json:"status"`
+		Providers map[string]string `json:"providers"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Status != "ok" || body.Providers["parakeet"] != "cold" {
+		t.Fatalf("unexpected health body: %+v", body)
+	}
+}
+
 func TestProviderTimeout(t *testing.T) {
 	// The job keeps running in the background even after the waiting HTTP
 	// request times out — a slow provider no longer gets its Synthesize call
@@ -388,6 +412,62 @@ func TestTranscriptionsPlainTextFormat(t *testing.T) {
 	}
 	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
 		t.Fatalf("unexpected content-type: %q", ct)
+	}
+}
+
+func TestTranscriptionsStreamsPartialText(t *testing.T) {
+	stt := fakeStreamingSttProvider{
+		fakeSttProvider: fakeSttProvider{id: "parakeet"},
+		partials:        []string{"hello", "hello world"},
+		final:           sttprovider.TranscriptionResult{Text: "hello world", ProviderID: "parakeet"},
+	}
+	s := newTestServer(t, fakeProvider{}, Config{SttProviders: []sttprovider.Provider{stt}})
+
+	resp := multipartAudioRequest(t, s, map[string]string{"stream": "true"}, []byte("audio"))
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if resp.StatusCode != http.StatusOK ||
+		!strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") ||
+		!strings.Contains(text, `"type":"transcript.text.delta"`) ||
+		!strings.Contains(text, `"delta":"hello world"`) ||
+		!strings.Contains(text, `"type":"transcript.text.done"`) ||
+		!strings.Contains(text, "data: [DONE]") {
+		t.Fatalf("unexpected streaming response: status=%d headers=%v body=%q", resp.StatusCode, resp.Header, text)
+	}
+}
+
+func TestTranscriptionsUsesConfiguredDefaultProvider(t *testing.T) {
+	var parakeetCalled bool
+	parakeet := fakeSttProvider{
+		id:     "parakeet",
+		result: sttprovider.TranscriptionResult{Text: "primary"},
+		transcribeHook: func(sttprovider.TranscriptionRequest) {
+			parakeetCalled = true
+		},
+	}
+	nemotron := fakeSttProvider{
+		id:     "nemotron",
+		result: sttprovider.TranscriptionResult{Text: "fallback"},
+		transcribeHook: func(sttprovider.TranscriptionRequest) {
+			t.Fatal("non-default STT provider was called")
+		},
+	}
+	s := newTestServer(t, fakeProvider{}, Config{
+		SttProviders:       []sttprovider.Provider{nemotron, parakeet},
+		DefaultSttProvider: "parakeet",
+	})
+
+	resp := multipartAudioRequest(t, s, map[string]string{"model": "auto"}, []byte("audio"))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if !parakeetCalled {
+		t.Fatal("configured default STT provider was not called")
 	}
 }
 
@@ -592,13 +672,35 @@ type fakeSttProvider struct {
 	id             string
 	result         sttprovider.TranscriptionResult
 	healthErr      error
+	onDemand       bool
 	transcribeErr  error
 	transcribeHook func(sttprovider.TranscriptionRequest)
+}
+
+type fakeStreamingSttProvider struct {
+	fakeSttProvider
+	partials []string
+	final    sttprovider.TranscriptionResult
+}
+
+func (f fakeStreamingSttProvider) TranscribeStream(
+	_ context.Context,
+	_ sttprovider.TranscriptionRequest,
+	onPartial func(sttprovider.TranscriptionResult) error,
+) (sttprovider.TranscriptionResult, error) {
+	for _, text := range f.partials {
+		if err := onPartial(sttprovider.TranscriptionResult{Text: text, ProviderID: f.id}); err != nil {
+			return sttprovider.TranscriptionResult{}, err
+		}
+	}
+	return f.final, nil
 }
 
 func (f fakeSttProvider) ID() string { return f.id }
 
 func (f fakeSttProvider) Health(context.Context) error { return f.healthErr }
+
+func (f fakeSttProvider) StartsOnDemand() bool { return f.onDemand }
 
 func (f fakeSttProvider) Transcribe(_ context.Context, req sttprovider.TranscriptionRequest) (sttprovider.TranscriptionResult, error) {
 	if f.transcribeHook != nil {

@@ -12,6 +12,7 @@ internal/provider/omnivoice/ — OmniVoice HTTP sidecar client provider (impleme
 internal/provider/kokoro/    — Kokoro TTS HTTP sidecar client provider (implements Lifecycle)
 internal/sttprovider/        — Provider interface for speech-to-text (separate from Provider/TTS)
 internal/provider/fasterwhisper/ — faster-whisper STT HTTP sidecar client provider
+internal/provider/parakeet/    — Parakeet-TDT audio.cpp STT client provider
 internal/encode/             — ffmpeg WAV→{MP3,OGG,Opus,FLAC} encoder
 internal/run/                — thin subprocess abstraction (testable Command type)
 tts/espeak-ng/                — espeak-ng setup notes (no code, system binary only)
@@ -54,7 +55,7 @@ Only `espeak-ng` implements `provider.Streamer` today (see `docs/providers.md`);
 
 ## Speech-to-text
 
-`POST /v1/audio/transcriptions` is a third, independent request path — it doesn't touch `internal/queue`, `provider.Provider`, or any of the TTS machinery above. STT uses its own interface, `sttprovider.Provider` (`internal/sttprovider`), and `server.transcriptions` calls `Transcribe` directly and synchronously, bounded by `AUDIO_REQUEST_TIMEOUT_SECONDS`. This is a deliberate scope choice, not an oversight: the queue exists to solve GPU lifecycle + "see my position in line" for slow generation, and today's only STT provider (faster-whisper) is a quick single round trip that doesn't need that. The faster-whisper sidecar manages its own idle-unload timer internally instead (see `docs/providers.md`) as a lighter-weight stand-in for the same VRAM concern.
+`POST /v1/audio/transcriptions` is a third, independent request path — it doesn't touch `internal/queue` or `provider.Provider`. STT uses its own `sttprovider.Provider` interface, plus the optional `StreamingProvider` interface for cumulative partial results. Normal requests call `Transcribe`; `stream=true` relays provider partials as SSE. Both paths are bounded by `AUDIO_REQUEST_TIMEOUT_SECONDS`. Parakeet, Nemotron, and faster-whisper use the same exclusive GPU lifecycle manager, which starts the selected sidecar on demand and stops the previously active GPU process first. Faster-whisper is registered as an arbitrary Python command while the native providers use audio.cpp configuration files.
 
 ## Testability
 

@@ -211,6 +211,10 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	}
 	for id, p := range s.sttProviders {
 		if err := p.Health(ctx); err != nil {
+			if onDemand, ok := p.(sttprovider.OnDemandProvider); ok && onDemand.StartsOnDemand() {
+				checks[id] = "cold"
+				continue
+			}
 			status = http.StatusServiceUnavailable
 			checks[id] = err.Error()
 			continue
@@ -765,6 +769,15 @@ func (s *Server) transcriptions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("response_format must be json or text"))
 		return
 	}
+	stream := false
+	switch strings.ToLower(strings.TrimSpace(r.FormValue("stream"))) {
+	case "", "false", "0":
+	case "true", "1":
+		stream = true
+	default:
+		writeError(w, http.StatusBadRequest, errors.New("stream must be true or false"))
+		return
+	}
 
 	p, ok := s.sttProviderFor(model)
 	if !ok {
@@ -778,12 +791,17 @@ func (s *Server) transcriptions(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel = context.WithTimeout(ctx, s.requestTimeout)
 		defer cancel()
 	}
-	result, err := p.Transcribe(ctx, sttprovider.TranscriptionRequest{
+	transcriptionRequest := sttprovider.TranscriptionRequest{
 		Audio:    audio,
 		Filename: header.Filename,
 		Language: r.FormValue("language"),
 		Model:    model,
-	})
+	}
+	if stream {
+		s.streamTranscription(w, ctx, p, transcriptionRequest)
+		return
+	}
+	result, err := p.Transcribe(ctx, transcriptionRequest)
 	if err != nil {
 		writeSttProviderError(w, err)
 		return
@@ -796,6 +814,66 @@ func (s *Server) transcriptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"text": result.Text})
+}
+
+func (s *Server) streamTranscription(
+	w http.ResponseWriter,
+	ctx context.Context,
+	p sttprovider.Provider,
+	req sttprovider.TranscriptionRequest,
+) {
+	streaming, ok := p.(sttprovider.StreamingProvider)
+	if !ok {
+		writeError(w, http.StatusBadRequest, errors.New("selected transcription provider does not support streaming"))
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, errors.New("streaming is not supported by this server"))
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	writeEvent := func(event map[string]any) error {
+		data, err := json.Marshal(event)
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
+
+	result, err := streaming.TranscribeStream(ctx, req, func(partial sttprovider.TranscriptionResult) error {
+		return writeEvent(map[string]any{
+			"type":  "transcript.text.delta",
+			"delta": partial.Text,
+		})
+	})
+	if err != nil {
+		_ = writeEvent(map[string]any{
+			"type": "error",
+			"error": map[string]string{
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+	if err := writeEvent(map[string]any{
+		"type": "transcript.text.done",
+		"text": result.Text,
+	}); err != nil {
+		return
+	}
+	_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	flusher.Flush()
 }
 
 func (s *Server) sttProviderFor(model string) (sttprovider.Provider, bool) {

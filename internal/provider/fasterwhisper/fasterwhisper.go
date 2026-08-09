@@ -24,11 +24,14 @@ type HTTPClient interface {
 }
 
 type Provider struct {
-	BaseURL string
-	Client  HTTPClient
+	BaseURL   string
+	Client    HTTPClient
+	StartFunc func() error
 }
 
 var _ sttprovider.Provider = Provider{}
+var _ sttprovider.StreamingProvider = Provider{}
+var _ sttprovider.OnDemandProvider = Provider{}
 
 func New(baseURL string, client HTTPClient) Provider {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
@@ -40,6 +43,10 @@ func New(baseURL string, client HTTPClient) Provider {
 
 func (p Provider) ID() string {
 	return id
+}
+
+func (p Provider) StartsOnDemand() bool {
+	return p.StartFunc != nil
 }
 
 func (p Provider) Health(ctx context.Context) error {
@@ -72,9 +79,14 @@ func (p Provider) Transcribe(ctx context.Context, req sttprovider.TranscriptionR
 	if len(req.Audio) == 0 {
 		return sttprovider.TranscriptionResult{}, fmt.Errorf("%w: audio is required", sttprovider.ErrInvalidRequest)
 	}
+	if p.StartFunc != nil {
+		if err := p.StartFunc(); err != nil {
+			return sttprovider.TranscriptionResult{}, fmt.Errorf("%w: lifecycle start failed: %v", sttprovider.ErrUnavailable, err)
+		}
+	}
 
 	endpoint := p.BaseURL + "/transcribe"
-	if language := strings.TrimSpace(req.Language); language != "" {
+	if language := normalizeLanguage(req.Language); language != "" {
 		endpoint += "?" + url.Values{"language": {language}}.Encode()
 	}
 
@@ -107,6 +119,36 @@ func (p Provider) Transcribe(ctx context.Context, req sttprovider.TranscriptionR
 		Duration:   parsed.Duration,
 		ProviderID: id,
 	}, nil
+}
+
+// normalizeLanguage converts browser-facing BCP-47 locale tags (for example,
+// el-GR or en_US) to the ISO-639 language codes accepted by faster-whisper.
+func normalizeLanguage(language string) string {
+	language = strings.ToLower(strings.TrimSpace(language))
+	if separator := strings.IndexAny(language, "-_"); separator >= 0 {
+		language = language[:separator]
+	}
+	return language
+}
+
+// TranscribeStream adapts the sidecar's buffered response to the server's SSE
+// contract. Live-mic clients already submit cumulative snapshots every few
+// seconds, so emitting each completed snapshot still provides live updates.
+func (p Provider) TranscribeStream(
+	ctx context.Context,
+	req sttprovider.TranscriptionRequest,
+	onPartial func(sttprovider.TranscriptionResult) error,
+) (sttprovider.TranscriptionResult, error) {
+	result, err := p.Transcribe(ctx, req)
+	if err != nil {
+		return sttprovider.TranscriptionResult{}, err
+	}
+	if onPartial != nil {
+		if err := onPartial(result); err != nil {
+			return sttprovider.TranscriptionResult{}, err
+		}
+	}
+	return result, nil
 }
 
 func errorDetail(status int, body []byte) string {
