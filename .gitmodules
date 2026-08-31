@@ -7,3 +7,6 @@
 [submodule "whisper.cpp"]
 	path = whisper.cpp
 	url = https://github.com/ggerganov/whisper.cpp.git
+[submodule "transcribe.cpp"]
+	path = transcribe.cpp
+	url = https://github.com/handy-computer/transcribe.cpp.git
