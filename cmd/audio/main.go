@@ -148,16 +148,16 @@ func main() {
 		gpuLifecycle = lifecycle.NewManager(*audiocppBin)
 		idleDelay := time.Duration(*audiocppIdle) * time.Second
 		if strings.TrimSpace(*audiocppBin) != "" && strings.TrimSpace(*omnivoiceAddr) != "" {
-			gpuLifecycle.Register("omnivoice", "audio.cpp/omnivoice-server.json", 8020, idleDelay)
+			gpuLifecycle.Register("omnivoice", "audiocpp-configs/omnivoice.json", 8020, idleDelay)
 		}
 		if strings.TrimSpace(*audiocppBin) != "" && strings.TrimSpace(*supertonicAddr) != "" {
-			gpuLifecycle.Register("supertonic", "audio.cpp/supertonic-config.json", 8022, idleDelay)
+			gpuLifecycle.Register("supertonic", "audiocpp-configs/supertonic.json", 8022, idleDelay)
 		}
 		if strings.TrimSpace(*audiocppBin) != "" && *sttEnabled && *parakeetEnabled && strings.TrimSpace(*parakeetAddr) != "" {
 			gpuLifecycle.Register("parakeet", "audiocpp-configs/parakeet.json", 8026, idleDelay)
 		}
 		if strings.TrimSpace(*audiocppBin) != "" && *sttEnabled && strings.TrimSpace(*nemotronAddr) != "" {
-			gpuLifecycle.Register("nemotron", "audio.cpp/nemotron-config.json", 8024, idleDelay)
+			gpuLifecycle.Register("nemotron", "audiocpp-configs/nemotron.json", 8024, idleDelay)
 		}
 		if strings.TrimSpace(*audiocppBin) != "" && *qwen3ASR06Enabled {
 			gpuLifecycle.Register("qwen3-asr-0.6b", "audiocpp-configs/qwen3-asr-0.6b.json", 8027, idleDelay)

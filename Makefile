@@ -27,8 +27,9 @@ PIDIR      := .pids
 AUDIOCPP_BIN := audio.cpp/build/linux-cuda-release/bin/audiocpp_server
 AUDIOCPP_CFG := audio.cpp/omnivoice-server.json
 AUDIOCPP_SENTINEL := .built-audiocpp
+CUDA_HOME ?= /usr/local/cuda
 
-.PHONY: build run stop clean
+.PHONY: build build-audiocpp run stop clean
 
 build:
 	@echo "  → building $(BIN)"
@@ -36,9 +37,22 @@ build:
 	go build -o $(BIN) ./cmd/audio
 	@echo "  → built $(BIN)"
 
+build-audiocpp: $(AUDIOCPP_SENTINEL)
+
 $(AUDIOCPP_SENTINEL):
 	@echo "  → building audiocpp_server (one-time, ~5-10 min)..."
-	cd audio.cpp && bash scripts/build_linux.sh --backend cuda --target audiocpp_server
+	@test -x "$(CUDA_HOME)/bin/nvcc" || { \
+		echo "CUDA compiler not found at $(CUDA_HOME)/bin/nvcc" >&2; \
+		exit 1; \
+	}
+	cd audio.cpp && \
+		PATH="$(CUDA_HOME)/bin:$$PATH" \
+		CUDAToolkit_ROOT="$(CUDA_HOME)" \
+		CUDACXX="$(CUDA_HOME)/bin/nvcc" \
+		bash scripts/build_linux.sh \
+			--backend cuda \
+			--model-set full \
+			--target audiocpp_server
 	@touch $(AUDIOCPP_SENTINEL)
 	@echo "  → audiocpp_server built"
 

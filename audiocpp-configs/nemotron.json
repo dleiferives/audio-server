@@ -1,6 +1,6 @@
 {
   "host": "127.0.0.1",
-  "port": 8028,
+  "port": 8024,
   "backend": "cuda",
   "device": 0,
   "threads": 12,
@@ -8,9 +8,9 @@
   "model_spec_override": "../audio.cpp/model_specs",
   "models": [
     {
-      "id": "qwen3-asr-1.7b",
-      "family": "qwen3_asr",
-      "path": "../models/Qwen3-ASR-1.7B-GGUF/qwen3-asr-1.7b-q8_0.gguf",
+      "id": "nemotron",
+      "family": "nemotron_asr",
+      "path": "../models/Nemotron-3.5-ASR-Streaming-0.6B-GGUF/nemotron-3.5-asr-streaming-0.6b-q8_0.gguf",
       "task": "asr",
       "mode": "streaming"
     }

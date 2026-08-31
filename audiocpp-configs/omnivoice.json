@@ -1,6 +1,6 @@
 {
   "host": "127.0.0.1",
-  "port": 8028,
+  "port": 8020,
   "backend": "cuda",
   "device": 0,
   "threads": 12,
@@ -8,10 +8,10 @@
   "model_spec_override": "../audio.cpp/model_specs",
   "models": [
     {
-      "id": "qwen3-asr-1.7b",
-      "family": "qwen3_asr",
-      "path": "../models/Qwen3-ASR-1.7B-GGUF/qwen3-asr-1.7b-q8_0.gguf",
-      "task": "asr",
+      "id": "omnivoice",
+      "family": "omnivoice",
+      "path": "../models/OmniVoice-GGUF/omnivoice-q8_0.gguf",
+      "task": "tts",
       "mode": "streaming"
     }
   ]

@@ -1,0 +1,27 @@
+# Minimal local-development configuration used by setup-local.sh.
+addr: "0.0.0.0:18010"
+web_dir: "web"
+audio_store_dir: "audio-output"
+audio_ttl_seconds: 0
+max_input_chars: 5000
+request_timeout_seconds: 30
+max_concurrency: 2
+
+espeak_path: "espeak-ng"
+espeak_default_voice: "en"
+mp3_bitrate: "48k"
+ffmpeg_path: "ffmpeg"
+
+# Optional model sidecars are disabled for the first local build.
+omnivoice_enabled: false
+omnivoice_addr: ""
+supertonic_addr: ""
+audiocpp_bin: ""
+kokoro_enabled: false
+stt_enabled: false
+parakeet_enabled: false
+nemotron_addr: ""
+qwen3_asr_0_6b_enabled: false
+qwen3_asr_1_7b_enabled: false
+faster_whisper_enabled: false
+align_enabled: false

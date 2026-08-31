@@ -3,4 +3,7 @@
 	url = https://github.com/0xShug0/audio.cpp.git
 [submodule "mfa-go"]
 	path = mfa-go
-	url = /home/dleiferives/projs/MFA-go
+	url = https://github.com/dleiferives/MFA-go.git
+[submodule "whisper.cpp"]
+	path = whisper.cpp
+	url = https://github.com/ggerganov/whisper.cpp.git

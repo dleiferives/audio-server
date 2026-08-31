@@ -1,0 +1,21 @@
+{
+  "host": "127.0.0.1",
+  "port": 8022,
+  "backend": "cuda",
+  "device": 0,
+  "threads": 12,
+  "lazy_load": true,
+  "model_spec_override": "../audio.cpp/model_specs",
+  "models": [
+    {
+      "id": "supertonic",
+      "family": "supertonic",
+      "path": "../models/Supertonic-3-GGUF/supertonic-3-q8_0.gguf",
+      "task": "tts",
+      "mode": "streaming",
+      "default_voice_preset": {
+        "voice_id": "M1"
+      }
+    }
+  ]
+}
