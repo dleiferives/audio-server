@@ -4,6 +4,7 @@ __pycache__/
 /.pids/
 /models/
 /.built-audiocpp
+/.built-transcribecpp
 /audio.cpp/build/
 /audio-output/
 /mfa/work/

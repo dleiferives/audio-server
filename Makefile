@@ -3,6 +3,7 @@ ESPEAK        ?= 1
 OMNIVOICE     ?= 1
 KOKORO        ?= 0
 ALIGN         ?= 0
+TRANSCRIBECPP ?= 1
 
 # ── ports ──
 SERVER_PORT    ?= 8010
@@ -27,9 +28,14 @@ PIDIR      := .pids
 AUDIOCPP_BIN := audio.cpp/build/linux-cuda-release/bin/audiocpp_server
 AUDIOCPP_CFG := audio.cpp/omnivoice-server.json
 AUDIOCPP_SENTINEL := .built-audiocpp
+TRANSCRIBECPP_BUILD := transcribe.cpp/build/linux-cuda-release
+TRANSCRIBECPP_BIN := bin/transcribecpp_server
+TRANSCRIBECPP_SENTINEL := .built-transcribecpp
+COHERE_MODEL := models/cohere-transcribe-03-2026-Q8_0.gguf
+COHERE_MODEL_URL := https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf/resolve/main/cohere-transcribe-03-2026-Q8_0.gguf
 CUDA_HOME ?= /usr/local/cuda
 
-.PHONY: build build-audiocpp run stop clean
+.PHONY: build build-audiocpp build-transcribecpp download-cohere run stop clean
 
 build:
 	@echo "  → building $(BIN)"
@@ -38,6 +44,10 @@ build:
 	@echo "  → built $(BIN)"
 
 build-audiocpp: $(AUDIOCPP_SENTINEL)
+
+build-transcribecpp: $(TRANSCRIBECPP_SENTINEL)
+
+download-cohere: $(COHERE_MODEL)
 
 $(AUDIOCPP_SENTINEL):
 	@echo "  → building audiocpp_server (one-time, ~5-10 min)..."
@@ -56,9 +66,48 @@ $(AUDIOCPP_SENTINEL):
 	@touch $(AUDIOCPP_SENTINEL)
 	@echo "  → audiocpp_server built"
 
+$(TRANSCRIBECPP_SENTINEL): stt/transcribecpp/server.cpp
+	@echo "  → building transcribe.cpp CUDA runtime and sidecar..."
+	@test -x "$(CUDA_HOME)/bin/nvcc" || { \
+		echo "CUDA compiler not found at $(CUDA_HOME)/bin/nvcc" >&2; \
+		exit 1; \
+	}
+	cmake -S transcribe.cpp -B $(TRANSCRIBECPP_BUILD) -G Ninja \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DTRANSCRIBE_CUDA=ON \
+		-DTRANSCRIBE_BUILD_TESTS=ON \
+		-DCMAKE_CUDA_COMPILER="$(CUDA_HOME)/bin/nvcc"
+	cmake --build $(TRANSCRIBECPP_BUILD) --target transcribe-cli -j "$$(nproc)"
+	@mkdir -p bin
+	c++ -std=c++17 -O3 -DNDEBUG -DTRANSCRIBE_STATIC \
+		-Itranscribe.cpp/include -Itranscribe.cpp/examples/common \
+		stt/transcribecpp/server.cpp -o $(TRANSCRIBECPP_BIN) \
+		$(TRANSCRIBECPP_BUILD)/src/libtranscribe.a \
+		$(TRANSCRIBECPP_BUILD)/examples/common/libtranscribe-common-example.a \
+		$(TRANSCRIBECPP_BUILD)/ggml/src/libggml.a \
+		$(TRANSCRIBECPP_BUILD)/ggml/src/libggml-cpu.a \
+		$(TRANSCRIBECPP_BUILD)/ggml/src/ggml-cuda/libggml-cuda.a \
+		$(TRANSCRIBECPP_BUILD)/ggml/src/libggml-base.a \
+		-L$(CUDA_HOME)/lib64 -Wl,-rpath,$(CUDA_HOME)/lib64 \
+		-lm -lcudart -lcublas -lcublasLt -lculibos -lcuda -ldl -lrt -pthread
+	@touch $(TRANSCRIBECPP_SENTINEL)
+	@echo "  → transcribecpp_server built"
+
+$(COHERE_MODEL):
+	@mkdir -p models
+	@echo "  → downloading Cohere Transcribe Q8 model (~2.4 GB)..."
+	curl --fail --location --continue-at - --output "$@" "$(COHERE_MODEL_URL)"
+	@echo "  → downloaded $@"
+
 run: build
 	@if [ "$(OMNIVOICE)" = "1" ] && [ ! -f "$(AUDIOCPP_SENTINEL)" ]; then \
 		$(MAKE) $(AUDIOCPP_SENTINEL); \
+	fi
+	@if [ "$(TRANSCRIBECPP)" = "1" ] && [ ! -f "$(TRANSCRIBECPP_SENTINEL)" ]; then \
+		$(MAKE) $(TRANSCRIBECPP_SENTINEL); \
+	fi
+	@if [ "$(TRANSCRIBECPP)" = "1" ] && [ ! -f "$(COHERE_MODEL)" ]; then \
+		$(MAKE) $(COHERE_MODEL); \
 	fi
 	@mkdir -p $(PIDIR)
 	@fuser -k $(OMNIVOICE_PORT)/tcp 2>/dev/null && sleep 0.5 || true
@@ -102,9 +151,9 @@ stop:
 	@echo "  → all stopped"
 
 clean:
-	rm -rf $(BIN) $(PIDIR) $(AUDIOCPP_SENTINEL)
+	rm -rf $(BIN) $(TRANSCRIBECPP_BIN) $(PIDIR) $(AUDIOCPP_SENTINEL) $(TRANSCRIBECPP_SENTINEL)
 	@echo "  → cleaned (use make clean-all to also remove audio.cpp build dir)"
 
 clean-all: clean
-	rm -rf audio.cpp/build
-	@echo "  → fully cleaned"
+	rm -rf audio.cpp/build transcribe.cpp/build
+	@echo "  → fully cleaned (downloaded models retained)"

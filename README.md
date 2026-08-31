@@ -9,7 +9,8 @@ A standalone audio manager service for TTS and STT. Exposes OpenAI-compatible sp
 | `espeak-ng` | local subprocess (TTS) | shipped |
 | `omnivoice` | HTTP sidecar (TTS, Python / GPU) | shipped, requires `AUDIO_OMNIVOICE_ADDR` |
 | `kokoro` | HTTP sidecar (TTS, Python / GPU or CPU) | shipped, requires `AUDIO_KOKORO_ADDR` |
-| `parakeet` | audio.cpp sidecar (STT, native CUDA/CPU) | shipped, configured as the default STT provider |
+| `cohere-transcribe` | transcribe.cpp sidecar (STT, native CUDA/CPU) | shipped, configured as the default STT provider |
+| `parakeet` | audio.cpp sidecar (STT, native CUDA/CPU) | shipped |
 | `nemotron` | audio.cpp sidecar (streaming-capable STT, native CUDA/CPU) | shipped |
 | `faster-whisper` | HTTP sidecar (STT, Python / GPU or CPU) | shipped, requires `AUDIO_FASTERWHISPER_ADDR` |
 
@@ -37,6 +38,10 @@ OpenAPI 3.1 contract from `http://127.0.0.1:8010/openapi.json`.
 
 ```bash
 go build -o bin/audio-server ./cmd/audio
+
+# Native transcribe.cpp CUDA sidecar + default Cohere Q8 model
+make build-transcribecpp
+make download-cohere
 ```
 
 ## Generate speech
@@ -80,8 +85,9 @@ curl -sS http://127.0.0.1:8010/v1/audio/transcriptions \
   -F language=en
 ```
 
-The checked-in configuration uses Parakeet-TDT by default. Set `model=nemotron`
-or `model=faster-whisper` to select another configured STT provider.
+The checked-in configuration uses Cohere Transcribe 03-2026 through the native
+transcribe.cpp runtime by default. Set `model=parakeet`, `model=nemotron`, or
+`model=faster-whisper` to select another configured STT provider.
 
 The web UI also supports a live microphone mode. Open
 `http://127.0.0.1:8010`, click **Start live mic**, and keep speaking. The
@@ -129,7 +135,9 @@ curl -sS http://127.0.0.1:8010/healthz
 | `AUDIO_OMNIVOICE_CONCURRENCY` | `1` | concurrent OmniVoice workers — keep at 1 on a single GPU with limited VRAM |
 | `AUDIO_AUDIOCPP_IDLE_UNLOAD` | `0` | optional idle unload timeout; `0` keeps models resident until VRAM-budget eviction |
 | `AUDIO_MAX_VRAM_MIB` | `auto` | model-residency budget; `auto` uses total VRAM reported by `nvidia-smi` |
-| `AUDIO_DEFAULT_STT_PROVIDER` | `parakeet` in `config.yml` | provider used for `auto`, `whisper-1`, and a blank transcription model |
+| `AUDIO_DEFAULT_STT_PROVIDER` | `cohere-transcribe` in `config.yml` | provider used for `auto`, `whisper-1`, and a blank transcription model |
+| `AUDIO_TRANSCRIBECPP_MODEL` | Cohere Q8 GGUF in `config.yml` | any transcribe.cpp-compatible GGUF model |
+| `AUDIO_TRANSCRIBECPP_BACKEND` | `cuda` in `config.yml` | transcribe.cpp backend (`auto`, `cuda`, or `cpu`) |
 | `AUDIO_PARAKEET_ADDR` | `http://127.0.0.1:8026` in `config.yml` | Parakeet-TDT audio.cpp sidecar base URL |
 | `AUDIO_NEMOTRON_ADDR` | `http://127.0.0.1:8024` in `config.yml` | Nemotron audio.cpp sidecar base URL |
 | `AUDIO_KOKORO_ADDR` | _(empty)_ | Kokoro sidecar base URL, e.g. `http://127.0.0.1:8021`; provider disabled when blank |
@@ -157,6 +165,13 @@ Faster-whisper is started on demand by the shared GPU lifecycle manager. It
 remains resident with other models when their configured estimates fit the
 VRAM budget, or triggers idle LRU eviction when they do not. See
 [`docs/providers.md`](docs/providers.md#faster-whisper).
+
+## transcribe.cpp (primary STT)
+
+The pinned native runtime supports Cohere, Whisper, Qwen3, Parakeet, Canary,
+Granite, Voxtral, and other GGUF ASR families. See
+[`stt/transcribecpp/README.md`](stt/transcribecpp/README.md) for build and run
+commands.
 
 ## Parakeet-TDT (primary STT)
 

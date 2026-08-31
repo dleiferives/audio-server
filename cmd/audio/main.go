@@ -28,6 +28,7 @@ import (
 	"github.com/dleiferives/audio-server/internal/provider/parakeet"
 	"github.com/dleiferives/audio-server/internal/provider/qwen3asr"
 	"github.com/dleiferives/audio-server/internal/provider/supertonic"
+	"github.com/dleiferives/audio-server/internal/provider/transcribecpp"
 	"github.com/dleiferives/audio-server/internal/queue"
 	"github.com/dleiferives/audio-server/internal/server"
 	"github.com/dleiferives/audio-server/internal/store"
@@ -75,6 +76,14 @@ type configFile struct {
 	Qwen3ASR06Addr            string         `yaml:"qwen3_asr_0_6b_addr"`
 	Qwen3ASR17Enabled         bool           `yaml:"qwen3_asr_1_7b_enabled"`
 	Qwen3ASR17Addr            string         `yaml:"qwen3_asr_1_7b_addr"`
+	TranscribecppEnabled      bool           `yaml:"transcribecpp_enabled"`
+	TranscribecppProviderID   string         `yaml:"transcribecpp_provider_id"`
+	TranscribecppAddr         string         `yaml:"transcribecpp_addr"`
+	TranscribecppBin          string         `yaml:"transcribecpp_bin"`
+	TranscribecppPort         int            `yaml:"transcribecpp_port"`
+	TranscribecppModel        string         `yaml:"transcribecpp_model"`
+	TranscribecppBackend      string         `yaml:"transcribecpp_backend"`
+	TranscribecppThreads      int            `yaml:"transcribecpp_threads"`
 	AlignEnabled              bool           `yaml:"align_enabled"`
 	AlignMFAEnv               string         `yaml:"align_mfa_env"`
 	AlignMFAWorkDir           string         `yaml:"align_mfa_work_dir"`
@@ -130,6 +139,14 @@ func main() {
 	qwen3ASR06Addr := flag.String("qwen3-asr-0.6b-addr", env("AUDIO_QWEN3_ASR_0_6B_ADDR", valueOr(cfg.Qwen3ASR06Addr, "http://127.0.0.1:8027")), "Qwen3-ASR 0.6B sidecar base URL")
 	qwen3ASR17Enabled := flag.Bool("qwen3-asr-1.7b-enabled", cfg.Qwen3ASR17Enabled, "enable Qwen3-ASR 1.7B provider")
 	qwen3ASR17Addr := flag.String("qwen3-asr-1.7b-addr", env("AUDIO_QWEN3_ASR_1_7B_ADDR", valueOr(cfg.Qwen3ASR17Addr, "http://127.0.0.1:8028")), "Qwen3-ASR 1.7B sidecar base URL")
+	transcribecppEnabled := flag.Bool("transcribecpp-enabled", cfg.TranscribecppEnabled, "enable the native transcribe.cpp STT provider")
+	transcribecppProviderID := flag.String("transcribecpp-provider-id", env("AUDIO_TRANSCRIBECPP_PROVIDER_ID", valueOr(cfg.TranscribecppProviderID, "cohere-transcribe")), "provider/model id exposed by the transcribe.cpp sidecar")
+	transcribecppAddr := flag.String("transcribecpp-addr", env("AUDIO_TRANSCRIBECPP_ADDR", valueOr(cfg.TranscribecppAddr, "http://127.0.0.1:8031")), "transcribe.cpp sidecar base URL")
+	transcribecppBin := flag.String("transcribecpp-bin", env("AUDIO_TRANSCRIBECPP_BIN", valueOr(cfg.TranscribecppBin, "bin/transcribecpp_server")), "path to the transcribe.cpp sidecar binary")
+	transcribecppPort := flag.Int("transcribecpp-port", envInt("AUDIO_TRANSCRIBECPP_PORT", intOr(cfg.TranscribecppPort, 8031)), "local transcribe.cpp sidecar port")
+	transcribecppModel := flag.String("transcribecpp-model", env("AUDIO_TRANSCRIBECPP_MODEL", cfg.TranscribecppModel), "path to any transcribe.cpp-compatible GGUF model")
+	transcribecppBackend := flag.String("transcribecpp-backend", env("AUDIO_TRANSCRIBECPP_BACKEND", valueOr(cfg.TranscribecppBackend, "cuda")), "transcribe.cpp backend: auto, cuda, or cpu")
+	transcribecppThreads := flag.Int("transcribecpp-threads", envInt("AUDIO_TRANSCRIBECPP_THREADS", cfg.TranscribecppThreads), "transcribe.cpp CPU thread count (0 = automatic)")
 	webDir := flag.String("web-dir", env("AUDIO_WEB_DIR", cfg.WebDir), "optional path to static web frontend directory")
 	audioTTL := flag.Int("audio-ttl-seconds", envInt("AUDIO_AUDIO_TTL_SECONDS", cfg.AudioTTLSeconds), "audio file retention in seconds (0 = forever)")
 	audioStoreDir := flag.String("audio-store-dir", env("AUDIO_STORE_DIR", cfg.AudioStoreDir), "directory for generated audio files (empty = in-memory)")
@@ -145,7 +162,7 @@ func main() {
 	workers := map[string]int{espeakProvider.ID(): *maxConcurrency}
 
 	var gpuLifecycle *lifecycle.Manager
-	if strings.TrimSpace(*audiocppBin) != "" || *fasterWhisperEnabled {
+	if strings.TrimSpace(*audiocppBin) != "" || *fasterWhisperEnabled || *transcribecppEnabled {
 		maxVRAMMiB, err := resolveVRAMLimit(*maxVRAM)
 		if err != nil {
 			log.Fatalf("GPU VRAM configuration: %v", err)
@@ -191,6 +208,22 @@ func main() {
 				strings.TrimRight(*fasterWhisperAddr, "/")+"/health",
 				idleDelay,
 				modelVRAM(cfg.ModelVRAMMiB, "faster-whisper", 6000),
+			)
+		}
+		if *sttEnabled && *transcribecppEnabled && strings.TrimSpace(*transcribecppBin) != "" && strings.TrimSpace(*transcribecppModel) != "" {
+			gpuLifecycle.RegisterCommandModel(
+				*transcribecppProviderID,
+				*transcribecppBin,
+				[]string{
+					"--model", *transcribecppModel,
+					"--host", "127.0.0.1",
+					"--port", strconv.Itoa(*transcribecppPort),
+					"--backend", *transcribecppBackend,
+					"--threads", strconv.Itoa(*transcribecppThreads),
+				},
+				strings.TrimRight(*transcribecppAddr, "/")+"/health",
+				idleDelay,
+				modelVRAM(cfg.ModelVRAMMiB, *transcribecppProviderID, 3200),
 			)
 		}
 	}
@@ -272,6 +305,13 @@ func main() {
 			qw.StartFunc = func() error { return gpuLifecycle.Start("qwen3-asr-1.7b", false) }
 		}
 		sttProviders = append(sttProviders, qw)
+	}
+	if *sttEnabled && *transcribecppEnabled && strings.TrimSpace(*transcribecppModel) != "" {
+		tc := transcribecpp.New(*transcribecppProviderID, *transcribecppAddr, nil)
+		if gpuLifecycle != nil && gpuLifecycle.Has(*transcribecppProviderID) {
+			tc.StartFunc = func() error { return gpuLifecycle.Start(*transcribecppProviderID, false) }
+		}
+		sttProviders = append(sttProviders, tc)
 	}
 
 	var audioStore *store.Store

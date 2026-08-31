@@ -188,9 +188,27 @@ Providers with a strict input format implement
 the server uses the shared ffmpeg normalizer to decode the upload and produce
 the declared sample rate, channels, codec, and container. Already-conforming
 PCM WAV input is passed through without invoking ffmpeg. Parakeet, Nemotron,
-and Qwen3-ASR currently declare mono 16 kHz PCM WAV; faster-whisper accepts the
+Qwen3-ASR, and transcribe.cpp currently declare mono 16 kHz PCM WAV; faster-whisper accepts the
 original upload directly. Invalid or undecodable input returns `400` before a
 provider is started.
+
+### transcribe.cpp
+
+**Default ID:** `cohere-transcribe`
+
+**Package:** `internal/provider/transcribecpp`
+
+**Runtime:** pinned `transcribe.cpp` submodule with the native sidecar in `stt/transcribecpp`
+
+The sidecar uses transcribe.cpp's stable C API and keeps its GGUF model loaded
+between requests. It is not Cohere-specific: changing `transcribecpp_model` and
+`transcribecpp_provider_id` can expose any model family supported by the pinned
+runtime. The checked-in configuration uses Cohere Transcribe 03-2026 Q8, which
+is downloaded with `make download-cohere` and built with
+`make build-transcribecpp`.
+
+It participates in the shared VRAM budget and LRU eviction policy. Uploads are
+normalized by the main server to mono 16 kHz PCM WAV before dispatch.
 
 ### Parakeet-TDT
 
@@ -198,7 +216,7 @@ provider is started.
 **Package:** `internal/provider/parakeet`
 **Runtime:** `audio.cpp` (`audiocpp-configs/parakeet.json`)
 
-Parakeet-TDT 0.6B v3 is the default STT provider in `config.yml`. It supports
+Parakeet-TDT 0.6B v3 is an available STT provider in `config.yml`. It supports
 25 European languages with automatic language detection. The lifecycle manager
 starts its CUDA sidecar on the first request and keeps it resident alongside
 other models when the configured VRAM budget allows. The checked-in sidecar configuration uses
