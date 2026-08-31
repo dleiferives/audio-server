@@ -262,7 +262,7 @@ curl -sS http://127.0.0.1:8010/v1/audio/transcriptions \
 
 | Field | Required | Description |
 |---|---|---|
-| `file` | yes | Audio file. Parakeet expects a format supported by audio.cpp (WAV is recommended); faster-whisper also decodes common compressed containers. |
+| `file` | yes | Audio file. Common formats supported by ffmpeg are accepted, including WAV, MP3, Ogg/Opus, FLAC, and M4A. The server automatically converts audio to the selected provider's required sample rate, channel count, codec, and container. |
 | `model` | no | Provider ID (`parakeet`, `nemotron`, or `faster-whisper`). `whisper-1`, `auto`, or blank map to the configured default. |
 | `language` | no | ISO-639-1/BCP-47 language hint (e.g. `en`). Omit to let the model auto-detect. |
 | `response_format` | no | `json` (default, `{"text": "..."}`) or `text` (plain body). |
@@ -287,7 +287,7 @@ The response emits cumulative `transcript.text.delta` events, one
 
 | Status | Condition |
 |---|---|
-| 400 | Missing `file`, invalid `response_format`, or unknown `model` |
+| 400 | Missing, corrupt, or unsupported audio; invalid `response_format`; or unknown `model` |
 | 401 | Missing or invalid API key (when `AUDIO_API_KEY` is set) |
 | 503 | No STT provider configured, or the provider is unavailable |
 | 504 | Timed out |

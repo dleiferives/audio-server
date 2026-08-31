@@ -296,6 +296,7 @@ func main() {
 		StreamWorkers:      workers,
 		SttProviders:       sttProviders,
 		DefaultSttProvider: *defaultSttProvider,
+		SttAudioNormalizer: encoder,
 		WebDir:             *webDir,
 		AudioStore:         audioStore,
 		AlignProvider:      alignProvider,

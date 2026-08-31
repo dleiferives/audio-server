@@ -45,6 +45,10 @@ func New(providerID, modelID, baseURL string, client HTTPClient) Provider {
 
 func (p Provider) ID() string { return p.ProviderID }
 
+func (p Provider) AudioRequirements() sttprovider.AudioFormat {
+	return sttprovider.AudioFormat{Container: "wav", Codec: "pcm_s16le", SampleRate: 16000, Channels: 1}
+}
+
 func (p Provider) StartsOnDemand() bool { return p.StartFunc != nil }
 
 func (p Provider) Health(ctx context.Context) error {

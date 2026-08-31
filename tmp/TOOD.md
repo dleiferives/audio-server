@@ -1,30 +1,5 @@
 # Near-term TODO
 
-## Normalize STT audio before provider dispatch
-
-The audio server should accept common uploaded audio formats and convert them
-to the format required by the selected STT provider. Clients should not need to
-know that a backend such as Parakeet requires mono, 16 kHz PCM.
-
-- Decode uploads with the existing ffmpeg integration.
-- Define each STT provider's required sample rate, channel count, sample format,
-  and container through provider capabilities instead of hard-coding Parakeet
-  behavior in the HTTP handler.
-- Normalize once in the server before buffered or streaming transcription
-  dispatch while preserving the original filename/format when conversion is
-  unnecessary.
-- Return a clear `400` error for corrupt or unsupported input rather than a
-  provider-level `503` error.
-- Add coverage for WAV inputs at 16 kHz and 22.05/44.1/48 kHz, stereo audio,
-  and compressed formats such as MP3, Ogg/Opus, FLAC, and M4A where ffmpeg can
-  decode them.
-- Verify the same normalized audio works with Parakeet, Nemotron, Qwen3-ASR,
-  and faster-whisper without changing the public transcription API.
-
-Acceptance criterion: uploading valid audio in any supported container results
-in a transcription request to the chosen provider in that provider's required
-native format, with no format preparation required by the caller.
-
 ## Add complete interactive API documentation
 
 Publish a complete OpenAPI 3.1 description of the audio server and serve an

@@ -47,6 +47,7 @@ type Config struct {
 	SttProviders       []sttprovider.Provider
 	DefaultSttProvider string
 	MaxUploadBytes     int
+	SttAudioNormalizer sttprovider.AudioNormalizer
 
 	// WebDir is an optional path to a directory of static files to serve at
 	// the root. When set, GET requests not matching any API route are served
@@ -81,6 +82,7 @@ type Server struct {
 	sttProviders       map[string]sttprovider.Provider
 	defaultSttProvider string
 	maxUploadBytes     int
+	sttAudioNormalizer sttprovider.AudioNormalizer
 	webDir             string
 	audioStore         *store.Store
 	alignProvider      Aligner
@@ -158,6 +160,7 @@ func New(cfg Config) (*Server, error) {
 		sttProviders:       sttProviders,
 		defaultSttProvider: cfg.DefaultSttProvider,
 		maxUploadBytes:     cfg.MaxUploadBytes,
+		sttAudioNormalizer: cfg.SttAudioNormalizer,
 		webDir:             cfg.WebDir,
 		audioStore:         cfg.AudioStore,
 		alignProvider:      cfg.AlignProvider,
@@ -791,9 +794,25 @@ func (s *Server) transcriptions(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel = context.WithTimeout(ctx, s.requestTimeout)
 		defer cancel()
 	}
+	filename := header.Filename
+	if constrained, ok := p.(sttprovider.AudioRequirementsProvider); ok {
+		if s.sttAudioNormalizer == nil {
+			writeSttProviderError(w, fmt.Errorf("%w: audio normalization is not configured", sttprovider.ErrUnavailable))
+			return
+		}
+		normalized, err := s.sttAudioNormalizer.NormalizeAudio(ctx, audio, constrained.AudioRequirements())
+		if err != nil {
+			writeSttProviderError(w, err)
+			return
+		}
+		audio = normalized.Audio
+		if normalized.Converted {
+			filename = normalizedWAVFilename(filename)
+		}
+	}
 	transcriptionRequest := sttprovider.TranscriptionRequest{
 		Audio:    audio,
-		Filename: header.Filename,
+		Filename: filename,
 		Language: r.FormValue("language"),
 		Model:    model,
 	}
@@ -814,6 +833,17 @@ func (s *Server) transcriptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"text": result.Text})
+}
+
+func normalizedWAVFilename(filename string) string {
+	filename = strings.TrimSpace(filename)
+	if filename == "" {
+		return "audio.wav"
+	}
+	if dot := strings.LastIndexByte(filename, '.'); dot > 0 {
+		filename = filename[:dot]
+	}
+	return filename + ".wav"
 }
 
 func (s *Server) streamTranscription(

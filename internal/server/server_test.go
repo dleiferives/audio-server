@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -490,6 +491,73 @@ func TestTranscriptionsProviderErrorMapsTo503(t *testing.T) {
 	}
 }
 
+func TestTranscriptionsNormalizesProviderAudioRequirements(t *testing.T) {
+	var gotRequest sttprovider.TranscriptionRequest
+	provider := fakeRequiredSttProvider{
+		fakeSttProvider: fakeSttProvider{
+			id:     "parakeet",
+			result: sttprovider.TranscriptionResult{Text: "normalized"},
+			transcribeHook: func(req sttprovider.TranscriptionRequest) {
+				gotRequest = req
+			},
+		},
+		requirements: sttprovider.AudioFormat{Container: "wav", Codec: "pcm_s16le", SampleRate: 16000, Channels: 1},
+	}
+	var gotFormat sttprovider.AudioFormat
+	normalizer := fakeAudioNormalizer(func(_ context.Context, audio []byte, format sttprovider.AudioFormat) (sttprovider.NormalizedAudio, error) {
+		if string(audio) != "mp3-audio" {
+			t.Fatalf("normalizer received %q", audio)
+		}
+		gotFormat = format
+		return sttprovider.NormalizedAudio{Audio: []byte("wav-16k-mono"), Converted: true}, nil
+	})
+	s := newTestServer(t, fakeProvider{}, Config{
+		SttProviders:       []sttprovider.Provider{provider},
+		SttAudioNormalizer: normalizer,
+	})
+
+	resp := multipartAudioRequest(t, s, nil, []byte("mp3-audio"))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if gotFormat.SampleRate != 16000 || gotFormat.Channels != 1 {
+		t.Fatalf("unexpected requirements: %+v", gotFormat)
+	}
+	if string(gotRequest.Audio) != "wav-16k-mono" || gotRequest.Filename != "audio.wav" {
+		t.Fatalf("provider received %+v", gotRequest)
+	}
+}
+
+func TestTranscriptionsNormalizationFailureReturns400(t *testing.T) {
+	called := false
+	provider := fakeRequiredSttProvider{
+		fakeSttProvider: fakeSttProvider{
+			id: "parakeet",
+			transcribeHook: func(sttprovider.TranscriptionRequest) {
+				called = true
+			},
+		},
+		requirements: sttprovider.AudioFormat{Container: "wav", Codec: "pcm_s16le", SampleRate: 16000, Channels: 1},
+	}
+	normalizer := fakeAudioNormalizer(func(context.Context, []byte, sttprovider.AudioFormat) (sttprovider.NormalizedAudio, error) {
+		return sttprovider.NormalizedAudio{}, fmt.Errorf("%w: corrupt audio", sttprovider.ErrInvalidRequest)
+	})
+	s := newTestServer(t, fakeProvider{}, Config{
+		SttProviders:       []sttprovider.Provider{provider},
+		SttAudioNormalizer: normalizer,
+	})
+
+	resp := multipartAudioRequest(t, s, nil, []byte("broken"))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if called {
+		t.Fatal("provider was called after normalization failed")
+	}
+}
+
 func TestVoices(t *testing.T) {
 	s := newTestServer(t, fakeProvider{
 		voices: []provider.Voice{{Provider: "fake", Voice: "en", Language: "en", Name: "English"}},
@@ -681,6 +749,21 @@ type fakeStreamingSttProvider struct {
 	fakeSttProvider
 	partials []string
 	final    sttprovider.TranscriptionResult
+}
+
+type fakeRequiredSttProvider struct {
+	fakeSttProvider
+	requirements sttprovider.AudioFormat
+}
+
+func (f fakeRequiredSttProvider) AudioRequirements() sttprovider.AudioFormat {
+	return f.requirements
+}
+
+type fakeAudioNormalizer func(context.Context, []byte, sttprovider.AudioFormat) (sttprovider.NormalizedAudio, error)
+
+func (f fakeAudioNormalizer) NormalizeAudio(ctx context.Context, audio []byte, format sttprovider.AudioFormat) (sttprovider.NormalizedAudio, error) {
+	return f(ctx, audio, format)
 }
 
 func (f fakeStreamingSttProvider) TranscribeStream(

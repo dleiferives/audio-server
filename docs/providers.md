@@ -183,6 +183,15 @@ It's intentionally not `provider.Provider` — the request/result shapes differ 
 
 Registered via `server.Config.SttProviders` / `DefaultSttProvider` — entirely optional; `POST /v1/audio/transcriptions` returns `503` if none are configured.
 
+Providers with a strict input format implement
+`sttprovider.AudioRequirementsProvider`. Before buffered or streaming dispatch,
+the server uses the shared ffmpeg normalizer to decode the upload and produce
+the declared sample rate, channels, codec, and container. Already-conforming
+PCM WAV input is passed through without invoking ffmpeg. Parakeet, Nemotron,
+and Qwen3-ASR currently declare mono 16 kHz PCM WAV; faster-whisper accepts the
+original upload directly. Invalid or undecodable input returns `400` before a
+provider is started.
+
 ### Parakeet-TDT
 
 **ID:** `parakeet`

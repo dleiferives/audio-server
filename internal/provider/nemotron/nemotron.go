@@ -42,6 +42,10 @@ func (p Provider) ID() string {
 	return id
 }
 
+func (p Provider) AudioRequirements() sttprovider.AudioFormat {
+	return sttprovider.AudioFormat{Container: "wav", Codec: "pcm_s16le", SampleRate: 16000, Channels: 1}
+}
+
 func (p Provider) StartsOnDemand() bool {
 	return p.StartFunc != nil
 }

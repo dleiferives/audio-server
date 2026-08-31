@@ -30,6 +30,34 @@ type TranscriptionResult struct {
 	ProviderID string
 }
 
+// AudioFormat describes the canonical input a provider requires. Empty or
+// zero-valued fields mean that the provider does not constrain that property.
+type AudioFormat struct {
+	Container  string
+	Codec      string
+	SampleRate int
+	Channels   int
+}
+
+// AudioRequirementsProvider is implemented by providers that require uploads
+// to be normalized before dispatch. Providers that accept arbitrary encoded
+// audio should not implement this interface.
+type AudioRequirementsProvider interface {
+	AudioRequirements() AudioFormat
+}
+
+type NormalizedAudio struct {
+	Audio     []byte
+	Converted bool
+}
+
+// AudioNormalizer converts arbitrary uploaded audio into a provider's required
+// input format. Implementations should return the original bytes unchanged
+// when they already match the requirement.
+type AudioNormalizer interface {
+	NormalizeAudio(ctx context.Context, audio []byte, format AudioFormat) (NormalizedAudio, error)
+}
+
 type Provider interface {
 	ID() string
 	Health(ctx context.Context) error
