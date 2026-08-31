@@ -492,6 +492,35 @@ func TestTranscriptionsUsesConfiguredDefaultProvider(t *testing.T) {
 	}
 }
 
+func TestTranscriptionsUsesAndReleasesRunGate(t *testing.T) {
+	acquired := false
+	released := false
+	stt := fakeSttProvider{
+		id:     "parakeet",
+		result: sttprovider.TranscriptionResult{Text: "ok"},
+		transcribeHook: func(sttprovider.TranscriptionRequest) {
+			if !acquired || released {
+				t.Fatal("provider ran outside the execution lease")
+			}
+		},
+	}
+	s := newTestServer(t, fakeProvider{}, Config{
+		SttProviders: []sttprovider.Provider{stt},
+		SttRunGate: func(id string) (func(), error) {
+			if id != "parakeet" {
+				t.Fatalf("gate provider = %q", id)
+			}
+			acquired = true
+			return func() { released = true }, nil
+		},
+	})
+	resp := multipartAudioRequest(t, s, nil, []byte("audio"))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !released {
+		t.Fatalf("status=%d released=%v", resp.StatusCode, released)
+	}
+}
+
 func TestTranscriptionsUnknownModelReturns400(t *testing.T) {
 	s := newTestServer(t, fakeProvider{}, Config{SttProviders: []sttprovider.Provider{fakeSttProvider{id: "faster-whisper"}}})
 	resp := multipartAudioRequest(t, s, map[string]string{"model": "nonexistent"}, []byte("audio"))

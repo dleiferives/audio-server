@@ -49,6 +49,9 @@ type Config struct {
 	DefaultSttProvider string
 	MaxUploadBytes     int
 	SttAudioNormalizer sttprovider.AudioNormalizer
+	// SttRunGate optionally acquires the shared GPU execution lease for a
+	// transcription provider. The returned function releases it.
+	SttRunGate func(providerID string) (func(), error)
 
 	// WebDir is an optional path to a directory of static files to serve at
 	// the root. When set, GET requests not matching any API route are served
@@ -84,6 +87,7 @@ type Server struct {
 	defaultSttProvider string
 	maxUploadBytes     int
 	sttAudioNormalizer sttprovider.AudioNormalizer
+	sttRunGate         func(string) (func(), error)
 	webDir             string
 	audioStore         *store.Store
 	alignProvider      Aligner
@@ -162,6 +166,7 @@ func New(cfg Config) (*Server, error) {
 		defaultSttProvider: cfg.DefaultSttProvider,
 		maxUploadBytes:     cfg.MaxUploadBytes,
 		sttAudioNormalizer: cfg.SttAudioNormalizer,
+		sttRunGate:         cfg.SttRunGate,
 		webDir:             cfg.WebDir,
 		audioStore:         cfg.AudioStore,
 		alignProvider:      cfg.AlignProvider,
@@ -819,6 +824,16 @@ func (s *Server) transcriptions(w http.ResponseWriter, r *http.Request) {
 		Filename: filename,
 		Language: r.FormValue("language"),
 		Model:    model,
+	}
+	if s.sttRunGate != nil {
+		release, err := s.sttRunGate(p.ID())
+		if err != nil {
+			writeSttProviderError(w, fmt.Errorf("%w: execution resource unavailable: %v", sttprovider.ErrUnavailable, err))
+			return
+		}
+		if release != nil {
+			defer release()
+		}
 	}
 	if stream {
 		s.streamTranscription(w, ctx, p, transcriptionRequest)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -36,46 +37,48 @@ import (
 )
 
 type configFile struct {
-	Addr                      string `yaml:"addr"`
-	APIKey                    string `yaml:"api_key"`
-	WebDir                    string `yaml:"web_dir"`
-	AudioStoreDir             string `yaml:"audio_store_dir"`
-	AudioTTLSeconds           int    `yaml:"audio_ttl_seconds"`
-	MaxInputChars             int    `yaml:"max_input_chars"`
-	RequestTimeoutSeconds     int    `yaml:"request_timeout_seconds"`
-	MaxConcurrency            int    `yaml:"max_concurrency"`
-	EspeakPath                string `yaml:"espeak_path"`
-	EspeakDefaultVoice        string `yaml:"espeak_default_voice"`
-	MP3Bitrate                string `yaml:"mp3_bitrate"`
-	FFmpegPath                string `yaml:"ffmpeg_path"`
-	OmnivoiceEnabled          bool   `yaml:"omnivoice_enabled"`
-	OmnivoiceAddr             string `yaml:"omnivoice_addr"`
-	OmnivoiceConcurrency      int    `yaml:"omnivoice_concurrency"`
-	SupertonicAddr            string `yaml:"supertonic_addr"`
-	AudiocppBin               string `yaml:"audiocpp_bin"`
-	AudiocppIdleUnloadSeconds int    `yaml:"audiocpp_idle_unload_seconds"`
-	KokoroEnabled             bool   `yaml:"kokoro_enabled"`
-	FasterWhisperEnabled      bool   `yaml:"faster_whisper_enabled"`
-	FasterWhisperAddr         string `yaml:"faster_whisper_addr"`
-	FasterWhisperPython       string `yaml:"faster_whisper_python"`
-	FasterWhisperScript       string `yaml:"faster_whisper_script"`
-	FasterWhisperPort         int    `yaml:"faster_whisper_port"`
-	FasterWhisperModelSize    string `yaml:"faster_whisper_model_size"`
-	FasterWhisperDevice       string `yaml:"faster_whisper_device"`
-	FasterWhisperComputeType  string `yaml:"faster_whisper_compute_type"`
-	STTEnabled                bool   `yaml:"stt_enabled"`
-	DefaultSttProvider        string `yaml:"default_stt_provider"`
-	ParakeetEnabled           bool   `yaml:"parakeet_enabled"`
-	ParakeetAddr              string `yaml:"parakeet_addr"`
-	NemotronAddr              string `yaml:"nemotron_addr"`
-	Qwen3ASR06Enabled         bool   `yaml:"qwen3_asr_0_6b_enabled"`
-	Qwen3ASR06Addr            string `yaml:"qwen3_asr_0_6b_addr"`
-	Qwen3ASR17Enabled         bool   `yaml:"qwen3_asr_1_7b_enabled"`
-	Qwen3ASR17Addr            string `yaml:"qwen3_asr_1_7b_addr"`
-	AlignEnabled              bool   `yaml:"align_enabled"`
-	AlignMFAEnv               string `yaml:"align_mfa_env"`
-	AlignMFAWorkDir           string `yaml:"align_mfa_work_dir"`
-	AlignMFAModelsConfig      string `yaml:"align_mfa_models_config"`
+	Addr                      string         `yaml:"addr"`
+	APIKey                    string         `yaml:"api_key"`
+	WebDir                    string         `yaml:"web_dir"`
+	AudioStoreDir             string         `yaml:"audio_store_dir"`
+	AudioTTLSeconds           int            `yaml:"audio_ttl_seconds"`
+	MaxInputChars             int            `yaml:"max_input_chars"`
+	RequestTimeoutSeconds     int            `yaml:"request_timeout_seconds"`
+	MaxConcurrency            int            `yaml:"max_concurrency"`
+	EspeakPath                string         `yaml:"espeak_path"`
+	EspeakDefaultVoice        string         `yaml:"espeak_default_voice"`
+	MP3Bitrate                string         `yaml:"mp3_bitrate"`
+	FFmpegPath                string         `yaml:"ffmpeg_path"`
+	OmnivoiceEnabled          bool           `yaml:"omnivoice_enabled"`
+	OmnivoiceAddr             string         `yaml:"omnivoice_addr"`
+	OmnivoiceConcurrency      int            `yaml:"omnivoice_concurrency"`
+	SupertonicAddr            string         `yaml:"supertonic_addr"`
+	AudiocppBin               string         `yaml:"audiocpp_bin"`
+	AudiocppIdleUnloadSeconds int            `yaml:"audiocpp_idle_unload_seconds"`
+	MaxVRAMMiB                any            `yaml:"max_vram_mib"`
+	ModelVRAMMiB              map[string]int `yaml:"model_vram_mib"`
+	KokoroEnabled             bool           `yaml:"kokoro_enabled"`
+	FasterWhisperEnabled      bool           `yaml:"faster_whisper_enabled"`
+	FasterWhisperAddr         string         `yaml:"faster_whisper_addr"`
+	FasterWhisperPython       string         `yaml:"faster_whisper_python"`
+	FasterWhisperScript       string         `yaml:"faster_whisper_script"`
+	FasterWhisperPort         int            `yaml:"faster_whisper_port"`
+	FasterWhisperModelSize    string         `yaml:"faster_whisper_model_size"`
+	FasterWhisperDevice       string         `yaml:"faster_whisper_device"`
+	FasterWhisperComputeType  string         `yaml:"faster_whisper_compute_type"`
+	STTEnabled                bool           `yaml:"stt_enabled"`
+	DefaultSttProvider        string         `yaml:"default_stt_provider"`
+	ParakeetEnabled           bool           `yaml:"parakeet_enabled"`
+	ParakeetAddr              string         `yaml:"parakeet_addr"`
+	NemotronAddr              string         `yaml:"nemotron_addr"`
+	Qwen3ASR06Enabled         bool           `yaml:"qwen3_asr_0_6b_enabled"`
+	Qwen3ASR06Addr            string         `yaml:"qwen3_asr_0_6b_addr"`
+	Qwen3ASR17Enabled         bool           `yaml:"qwen3_asr_1_7b_enabled"`
+	Qwen3ASR17Addr            string         `yaml:"qwen3_asr_1_7b_addr"`
+	AlignEnabled              bool           `yaml:"align_enabled"`
+	AlignMFAEnv               string         `yaml:"align_mfa_env"`
+	AlignMFAWorkDir           string         `yaml:"align_mfa_work_dir"`
+	AlignMFAModelsConfig      string         `yaml:"align_mfa_models_config"`
 }
 
 func loadConfig(path string) configFile {
@@ -89,13 +92,10 @@ func loadConfig(path string) configFile {
 }
 
 func main() {
-	cfgPath := flag.String("config", env("AUDIO_CONFIG", "config.yml"), "path to config file")
-	flag.Parse()
+	configPath := configPathFromArgs(os.Args[1:], env("AUDIO_CONFIG", "config.yml"))
+	cfg := loadConfig(configPath)
 
-	yaml.Unmarshal(nil, nil)
-
-	cfg := loadConfig(*cfgPath)
-
+	flag.String("config", configPath, "path to config file")
 	addr := flag.String("addr", env("AUDIO_ADDR", cfg.Addr), "listen address")
 	apiKey := flag.String("api-key", env("AUDIO_API_KEY", cfg.APIKey), "optional bearer API key")
 	maxConcurrency := flag.Int("max-concurrency", envInt("AUDIO_MAX_CONCURRENCY", cfg.MaxConcurrency), "maximum concurrent synthesis requests")
@@ -111,6 +111,7 @@ func main() {
 	supertonicAddr := flag.String("supertonic-addr", env("AUDIO_SUPERTONIC_ADDR", cfg.SupertonicAddr), "Supertonic sidecar base URL (e.g. http://127.0.0.1:8022); disabled when blank")
 	audiocppBin := flag.String("audiocpp-bin", env("AUDIO_AUDIOCPP_BIN", cfg.AudiocppBin), "path to audiocpp_server binary")
 	audiocppIdle := flag.Int("audiocpp-idle-unload-seconds", envInt("AUDIO_AUDIOCPP_IDLE_UNLOAD", cfg.AudiocppIdleUnloadSeconds), "seconds before unloading idle audiocpp_server instances")
+	maxVRAM := flag.String("max-vram-mib", env("AUDIO_MAX_VRAM_MIB", vramLimitString(cfg.MaxVRAMMiB)), "GPU residency budget in MiB, or auto")
 	kokoroEnabled := flag.Bool("kokoro-enabled", cfg.KokoroEnabled, "enable Kokoro TTS provider")
 	fasterWhisperEnabled := flag.Bool("faster-whisper-enabled", cfg.FasterWhisperEnabled, "enable faster-whisper STT provider")
 	fasterWhisperAddr := flag.String("faster-whisper-addr", env("AUDIO_FASTERWHISPER_ADDR", valueOr(cfg.FasterWhisperAddr, "http://127.0.0.1:8030")), "faster-whisper sidecar base URL")
@@ -145,28 +146,37 @@ func main() {
 
 	var gpuLifecycle *lifecycle.Manager
 	if strings.TrimSpace(*audiocppBin) != "" || *fasterWhisperEnabled {
-		gpuLifecycle = lifecycle.NewManager(*audiocppBin)
+		maxVRAMMiB, err := resolveVRAMLimit(*maxVRAM)
+		if err != nil {
+			log.Fatalf("GPU VRAM configuration: %v", err)
+		}
+		gpuLifecycle = lifecycle.NewManager(*audiocppBin, lifecycle.Config{MaxVRAMMiB: maxVRAMMiB})
+		if maxVRAMMiB > 0 {
+			log.Printf("GPU residency budget: %d MiB", maxVRAMMiB)
+		} else {
+			log.Printf("GPU residency budget: unavailable; budget eviction disabled")
+		}
 		idleDelay := time.Duration(*audiocppIdle) * time.Second
 		if strings.TrimSpace(*audiocppBin) != "" && strings.TrimSpace(*omnivoiceAddr) != "" {
-			gpuLifecycle.Register("omnivoice", "audiocpp-configs/omnivoice.json", 8020, idleDelay)
+			gpuLifecycle.RegisterModel("omnivoice", "audiocpp-configs/omnivoice.json", 8020, idleDelay, modelVRAM(cfg.ModelVRAMMiB, "omnivoice", 2048))
 		}
 		if strings.TrimSpace(*audiocppBin) != "" && strings.TrimSpace(*supertonicAddr) != "" {
-			gpuLifecycle.Register("supertonic", "audiocpp-configs/supertonic.json", 8022, idleDelay)
+			gpuLifecycle.RegisterModel("supertonic", "audiocpp-configs/supertonic.json", 8022, idleDelay, modelVRAM(cfg.ModelVRAMMiB, "supertonic", 1024))
 		}
 		if strings.TrimSpace(*audiocppBin) != "" && *sttEnabled && *parakeetEnabled && strings.TrimSpace(*parakeetAddr) != "" {
-			gpuLifecycle.Register("parakeet", "audiocpp-configs/parakeet.json", 8026, idleDelay)
+			gpuLifecycle.RegisterModel("parakeet", "audiocpp-configs/parakeet.json", 8026, idleDelay, modelVRAM(cfg.ModelVRAMMiB, "parakeet", 1280))
 		}
 		if strings.TrimSpace(*audiocppBin) != "" && *sttEnabled && strings.TrimSpace(*nemotronAddr) != "" {
-			gpuLifecycle.Register("nemotron", "audiocpp-configs/nemotron.json", 8024, idleDelay)
+			gpuLifecycle.RegisterModel("nemotron", "audiocpp-configs/nemotron.json", 8024, idleDelay, modelVRAM(cfg.ModelVRAMMiB, "nemotron", 1280))
 		}
 		if strings.TrimSpace(*audiocppBin) != "" && *qwen3ASR06Enabled {
-			gpuLifecycle.Register("qwen3-asr-0.6b", "audiocpp-configs/qwen3-asr-0.6b.json", 8027, idleDelay)
+			gpuLifecycle.RegisterModel("qwen3-asr-0.6b", "audiocpp-configs/qwen3-asr-0.6b.json", 8027, idleDelay, modelVRAM(cfg.ModelVRAMMiB, "qwen3-asr-0.6b", 1792))
 		}
 		if strings.TrimSpace(*audiocppBin) != "" && *qwen3ASR17Enabled {
-			gpuLifecycle.Register("qwen3-asr-1.7b", "audiocpp-configs/qwen3-asr-1.7b.json", 8028, idleDelay)
+			gpuLifecycle.RegisterModel("qwen3-asr-1.7b", "audiocpp-configs/qwen3-asr-1.7b.json", 8028, idleDelay, modelVRAM(cfg.ModelVRAMMiB, "qwen3-asr-1.7b", 3584))
 		}
 		if *fasterWhisperEnabled && strings.TrimSpace(*fasterWhisperPython) != "" && strings.TrimSpace(*fasterWhisperScript) != "" {
-			gpuLifecycle.RegisterCommand(
+			gpuLifecycle.RegisterCommandModel(
 				"faster-whisper",
 				*fasterWhisperPython,
 				[]string{
@@ -180,6 +190,7 @@ func main() {
 				},
 				strings.TrimRight(*fasterWhisperAddr, "/")+"/health",
 				idleDelay,
+				modelVRAM(cfg.ModelVRAMMiB, "faster-whisper", 6000),
 			)
 		}
 	}
@@ -187,7 +198,7 @@ func main() {
 	if strings.TrimSpace(*omnivoiceAddr) != "" {
 		ov := omnivoice.New(*omnivoiceAddr, nil, encoder)
 		if gpuLifecycle != nil {
-			ov.StartFunc = func() error { return gpuLifecycle.Start("omnivoice", true) }
+			ov.StartFunc = func() error { return gpuLifecycle.Start("omnivoice", false) }
 		}
 		providers = append(providers, ov)
 		workers["omnivoice"] = *omnivoiceConcurrency
@@ -195,7 +206,7 @@ func main() {
 	if strings.TrimSpace(*supertonicAddr) != "" {
 		st := supertonic.New(*supertonicAddr, nil, encoder)
 		if gpuLifecycle != nil {
-			st.StartFunc = func() error { return gpuLifecycle.Start("supertonic", true) }
+			st.StartFunc = func() error { return gpuLifecycle.Start("supertonic", false) }
 		}
 		providers = append(providers, st)
 		workers["supertonic"] = 2
@@ -210,13 +221,8 @@ func main() {
 	for _, p := range providers {
 		providerMap[p.ID()] = p
 	}
-	resourceGroups := map[string]string{}
-	resourceSwitchDelay := map[string]time.Duration{}
 	idleUnload := map[string]time.Duration{}
 	if gpuLifecycle != nil {
-		const gpuGroup = "audiocpp-gpu"
-		resourceGroups["omnivoice"] = gpuGroup
-		resourceGroups["supertonic"] = gpuGroup
 		idleDelay := time.Duration(*audiocppIdle) * time.Second
 		idleUnload["omnivoice"] = idleDelay
 		idleUnload["supertonic"] = idleDelay
@@ -224,47 +230,46 @@ func main() {
 
 	requestTimeout := time.Duration(*requestTimeoutSeconds) * time.Second
 	jobQueue := queue.NewManager(queue.Config{
-		Providers:           providerMap,
-		Workers:             workers,
-		IdleUnload:          idleUnload,
-		ResourceGroups:      resourceGroups,
-		ResourceSwitchDelay: resourceSwitchDelay,
-		SynthesizeTimeout:   requestTimeout,
+		Providers:         providerMap,
+		Workers:           workers,
+		IdleUnload:        idleUnload,
+		SynthesizeTimeout: requestTimeout,
+		RunGate:           gpuRunGate(gpuLifecycle),
 	})
 
 	var sttProviders []sttprovider.Provider
 	if *sttEnabled && *parakeetEnabled && strings.TrimSpace(*parakeetAddr) != "" {
 		pk := parakeet.New(*parakeetAddr, nil)
 		if gpuLifecycle != nil {
-			pk.StartFunc = func() error { return gpuLifecycle.Start("parakeet", true) }
+			pk.StartFunc = func() error { return gpuLifecycle.Start("parakeet", false) }
 		}
 		sttProviders = append(sttProviders, pk)
 	}
 	if *fasterWhisperEnabled {
 		fw := fasterwhisper.New(*fasterWhisperAddr, nil)
 		if gpuLifecycle != nil && strings.TrimSpace(*fasterWhisperPython) != "" && strings.TrimSpace(*fasterWhisperScript) != "" {
-			fw.StartFunc = func() error { return gpuLifecycle.Start("faster-whisper", true) }
+			fw.StartFunc = func() error { return gpuLifecycle.Start("faster-whisper", false) }
 		}
 		sttProviders = append(sttProviders, fw)
 	}
 	if *sttEnabled && strings.TrimSpace(*nemotronAddr) != "" {
 		nm := nemotron.New(*nemotronAddr, nil)
 		if gpuLifecycle != nil {
-			nm.StartFunc = func() error { return gpuLifecycle.Start("nemotron", true) }
+			nm.StartFunc = func() error { return gpuLifecycle.Start("nemotron", false) }
 		}
 		sttProviders = append(sttProviders, nm)
 	}
 	if *qwen3ASR06Enabled {
 		qw := qwen3asr.New("qwen3-asr-0.6b", "qwen3-asr-0.6b", *qwen3ASR06Addr, nil)
 		if gpuLifecycle != nil {
-			qw.StartFunc = func() error { return gpuLifecycle.Start("qwen3-asr-0.6b", true) }
+			qw.StartFunc = func() error { return gpuLifecycle.Start("qwen3-asr-0.6b", false) }
 		}
 		sttProviders = append(sttProviders, qw)
 	}
 	if *qwen3ASR17Enabled {
 		qw := qwen3asr.New("qwen3-asr-1.7b", "qwen3-asr-1.7b", *qwen3ASR17Addr, nil)
 		if gpuLifecycle != nil {
-			qw.StartFunc = func() error { return gpuLifecycle.Start("qwen3-asr-1.7b", true) }
+			qw.StartFunc = func() error { return gpuLifecycle.Start("qwen3-asr-1.7b", false) }
 		}
 		sttProviders = append(sttProviders, qw)
 	}
@@ -297,6 +302,7 @@ func main() {
 		SttProviders:       sttProviders,
 		DefaultSttProvider: *defaultSttProvider,
 		SttAudioNormalizer: encoder,
+		SttRunGate:         gpuRunGate(gpuLifecycle),
 		WebDir:             *webDir,
 		AudioStore:         audioStore,
 		AlignProvider:      alignProvider,
@@ -341,6 +347,20 @@ func env(key, fallback string) string {
 	return fallback
 }
 
+func configPathFromArgs(args []string, fallback string) string {
+	for i, arg := range args {
+		switch {
+		case (arg == "-config" || arg == "--config") && i+1 < len(args):
+			return args[i+1]
+		case strings.HasPrefix(arg, "-config="):
+			return strings.TrimPrefix(arg, "-config=")
+		case strings.HasPrefix(arg, "--config="):
+			return strings.TrimPrefix(arg, "--config=")
+		}
+	}
+	return fallback
+}
+
 func envInt(key string, fallback int) int {
 	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
@@ -365,6 +385,44 @@ func intOr(value, fallback int) int {
 		return fallback
 	}
 	return value
+}
+
+func vramLimitString(value any) string {
+	if value == nil || strings.TrimSpace(fmt.Sprint(value)) == "" {
+		return "auto"
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func resolveVRAMLimit(value string) (int, error) {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" || value == "auto" {
+		return lifecycle.DetectVRAMMiB()
+	}
+	limit, err := strconv.Atoi(value)
+	if err != nil || limit <= 0 {
+		return 0, fmt.Errorf("max_vram_mib must be auto or a positive integer, got %q", value)
+	}
+	return limit, nil
+}
+
+func modelVRAM(configured map[string]int, id string, fallback int) int {
+	if value := configured[id]; value > 0 {
+		return value
+	}
+	return fallback
+}
+
+func gpuRunGate(manager *lifecycle.Manager) func(string) (func(), error) {
+	if manager == nil {
+		return nil
+	}
+	return func(providerID string) (func(), error) {
+		if !manager.Has(providerID) {
+			return nil, nil
+		}
+		return manager.Acquire(providerID)
+	}
 }
 
 func loadAlignLanguages(path string) map[string]align.LanguageModel {

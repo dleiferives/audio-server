@@ -4,7 +4,7 @@
     "title": "audio-server API",
     "version": "1.0.0",
     "summary": "Local OpenAI-compatible speech, transcription, and alignment service",
-    "description": "audio-server routes TTS and STT requests to local subprocesses and lifecycle-managed CPU/CUDA sidecars. TTS providers have independent FIFO queues; GPU providers share an exclusive lifecycle group and start on demand. STT uploads are normalized to the selected provider's declared input format. Use the capabilities and voices endpoints instead of hard-coding the runtime catalog."
+    "description": "audio-server routes TTS and STT requests to local subprocesses and lifecycle-managed CPU/CUDA sidecars. TTS providers have independent FIFO queues; CUDA providers share one execution lease while models remain co-resident within a configurable VRAM budget. STT uploads are normalized to the selected provider's declared input format. Use the capabilities and voices endpoints instead of hard-coding the runtime catalog."
   },
   "externalDocs": {"description": "Conceptual API guide", "url": "https://github.com/dleiferives/audio-server/blob/trunk/docs/api.md"},
   "servers": [{"url": "/", "description": "This audio-server instance"}],

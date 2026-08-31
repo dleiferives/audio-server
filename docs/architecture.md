@@ -39,9 +39,9 @@ Both entry points submit to the same `queue.Manager`; `/v1/audio/speech` just al
 
 ## Queue and GPU model lifecycle
 
-`internal/queue.Manager` gives each provider ID its own FIFO queue and a fixed-size worker pool (`AUDIO_MAX_CONCURRENCY` for espeak-ng, `AUDIO_OMNIVOICE_CONCURRENCY` for OmniVoice). Providers can also be assigned to a shared exclusive resource. OmniVoice and Supertonic share the `audiocpp-gpu` resource, so requests for one remain queued while the other is active; requests for the same provider may still use that provider's configured worker count.
+`internal/queue.Manager` gives each provider ID its own FIFO queue and a fixed-size worker pool (`AUDIO_MAX_CONCURRENCY` for espeak-ng, `AUDIO_OMNIVOICE_CONCURRENCY` for OmniVoice). GPU-backed TTS jobs additionally acquire the shared lifecycle manager's execution lease. STT remains synchronous rather than joining the TTS queue, but acquires the same lease, so only one CUDA inference runs at a time across both directions.
 
-For providers with an expensive resource to manage, `provider.Lifecycle` (`Warm`/`Idle`) lets the manager load the model before the first job after an idle period. When switching providers in the shared GPU group, the manager waits until the current provider has no active or queued work, then waits one second before warming the next provider. This gives the previous native process time to finish releasing its model before the lifecycle manager starts the next one. `espeak-ng` doesn't implement lifecycle (nothing to warm); OmniVoice and Supertonic do. A per-provider mutex guarantees a timer-driven `Idle` and a worker-driven `Warm` never run concurrently.
+The lifecycle manager keeps multiple model sidecars resident when their configured `model_vram_mib` estimates fit within `max_vram_mib`. The default `auto` budget uses total VRAM reported by `nvidia-smi`. When a requested model would exceed the budget, idle models are stopped least-recently-used first. A model holding an execution lease is never evicted. This avoids model switching on roomy GPUs while retaining safe dynamic eviction on smaller GPUs.
 
 Jobs are tracked in memory only (map keyed by job ID); finished jobs are swept after ~10 minutes. A server restart loses all queued/in-flight/recently-finished jobs — there's no persistence.
 
@@ -55,7 +55,7 @@ Only `espeak-ng` implements `provider.Streamer` today (see `docs/providers.md`);
 
 ## Speech-to-text
 
-`POST /v1/audio/transcriptions` is a third, independent request path — it doesn't touch `internal/queue` or `provider.Provider`. STT uses its own `sttprovider.Provider` interface, plus the optional `StreamingProvider` interface for cumulative partial results. Normal requests call `Transcribe`; `stream=true` relays provider partials as SSE. Both paths are bounded by `AUDIO_REQUEST_TIMEOUT_SECONDS`. Parakeet, Nemotron, and faster-whisper use the same exclusive GPU lifecycle manager, which starts the selected sidecar on demand and stops the previously active GPU process first. Faster-whisper is registered as an arbitrary Python command while the native providers use audio.cpp configuration files.
+`POST /v1/audio/transcriptions` doesn't use the TTS job queue or `provider.Provider`. STT uses its own `sttprovider.Provider` interface, plus the optional `StreamingProvider` interface for cumulative partial results. Normal requests call `Transcribe`; `stream=true` relays provider partials as SSE. Both paths use the shared GPU execution/residency manager. Faster-whisper is registered as an arbitrary Python command while the native providers use audio.cpp configuration files.
 
 ## Testability
 

@@ -127,11 +127,11 @@ curl -sS http://127.0.0.1:8010/healthz
 | `AUDIO_DEFAULT_PROVIDER` | `espeak-ng` | provider used for `auto`, `tts-1`, and blank model |
 | `AUDIO_OMNIVOICE_ADDR` | _(empty)_ | OmniVoice sidecar base URL, e.g. `http://127.0.0.1:8020`; provider disabled when blank |
 | `AUDIO_OMNIVOICE_CONCURRENCY` | `1` | concurrent OmniVoice workers — keep at 1 on a single GPU with limited VRAM |
-| `AUDIO_AUDIOCPP_IDLE_UNLOAD` | `600` | seconds an empty OmniVoice/Supertonic queue waits before the native sidecar is unloaded |
+| `AUDIO_AUDIOCPP_IDLE_UNLOAD` | `0` | optional idle unload timeout; `0` keeps models resident until VRAM-budget eviction |
+| `AUDIO_MAX_VRAM_MIB` | `auto` | model-residency budget; `auto` uses total VRAM reported by `nvidia-smi` |
 | `AUDIO_DEFAULT_STT_PROVIDER` | `parakeet` in `config.yml` | provider used for `auto`, `whisper-1`, and a blank transcription model |
 | `AUDIO_PARAKEET_ADDR` | `http://127.0.0.1:8026` in `config.yml` | Parakeet-TDT audio.cpp sidecar base URL |
 | `AUDIO_NEMOTRON_ADDR` | `http://127.0.0.1:8024` in `config.yml` | Nemotron audio.cpp sidecar base URL |
-| `AUDIO_RESOURCE_SWITCH_DELAY_SECONDS` | `1` | quiet seconds after one audio.cpp provider finishes before another shared-GPU provider starts |
 | `AUDIO_KOKORO_ADDR` | _(empty)_ | Kokoro sidecar base URL, e.g. `http://127.0.0.1:8021`; provider disabled when blank |
 | `AUDIO_KOKORO_CONCURRENCY` | `1` | concurrent Kokoro workers |
 | `AUDIO_KOKORO_IDLE_UNLOAD_SECONDS` | `30` | seconds an empty Kokoro queue waits before the model is unloaded |
@@ -154,8 +154,8 @@ Used in place of Piper (issue #4), which doesn't run on the target hardware. See
 ## faster-whisper (STT)
 
 Faster-whisper is started on demand by the shared GPU lifecycle manager. It
-stops the active audio.cpp sidecar before loading `large-v3` INT8, and is
-stopped in turn before another GPU provider starts. See
+remains resident with other models when their configured estimates fit the
+VRAM budget, or triggers idle LRU eviction when they do not. See
 [`docs/providers.md`](docs/providers.md#faster-whisper).
 
 ## Parakeet-TDT (primary STT)

@@ -22,7 +22,16 @@ omnivoice_addr: "http://127.0.0.1:8020"
 omnivoice_concurrency: 1
 supertonic_addr: "http://127.0.0.1:8022"
 audiocpp_bin: "audio.cpp/build/linux-cuda-release/bin/audiocpp_server"
-audiocpp_idle_unload_seconds: 600
+audiocpp_idle_unload_seconds: 0  # keep resident until budget eviction; positive = idle timeout
+max_vram_mib: auto             # auto = total VRAM reported by nvidia-smi
+model_vram_mib:                # conservative residency estimates; tune per GPU/build
+  supertonic: 1024
+  omnivoice: 2048
+  parakeet: 1280
+  nemotron: 1280
+  qwen3-asr-0.6b: 1792
+  qwen3-asr-1.7b: 3584
+  faster-whisper: 6000
 
 # ── STT (audio.cpp) ──
 stt_enabled: true

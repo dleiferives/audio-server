@@ -13,7 +13,7 @@ type Provider interface {
 
 Providers are registered in `cmd/audio/main.go` and routed by the `model` field in speech requests. OpenAI model aliases (`tts-1`, `tts-1-hd`, `gpt-4o-mini-tts`, `auto`) all resolve to the configured default provider.
 
-Every buffered request runs through `internal/queue`, which gives each provider its own FIFO queue and worker pool (see `docs/architecture.md`). Providers that share an exclusive resource are coordinated by the same manager. `Synthesize` itself is unchanged by this — a provider still just does one request in, one result out.
+Every buffered request runs through `internal/queue`, which gives each provider its own FIFO queue and worker pool (see `docs/architecture.md`). CUDA providers also acquire the shared GPU execution lease. `Synthesize` itself is unchanged by this — a provider still just does one request in, one result out.
 
 ### Optional: `provider.Lifecycle`
 
@@ -109,7 +109,7 @@ python -m pip install omnivoice==0.1.5
 
 ### GPU model lifecycle (VRAM budget)
 
-The sidecar doesn't load the model at startup — it loads lazily, on the queue manager's first `Warm` call (or on the first direct `/synthesize` call, defensively). This matters on VRAM-constrained boxes: the model stays resident while OmniVoice jobs keep arriving, and the native sidecar is unloaded after the queue has been empty for `AUDIO_AUDIOCPP_IDLE_UNLOAD` (default 600s). `AUDIO_OMNIVOICE_CONCURRENCY` (default **1**) caps how many OmniVoice jobs run at once — keep this at 1 on a single GPU with limited VRAM, since the sidecar has no concept of splitting VRAM across concurrent generations. Pass `--preload` / `OMNIVOICE_PRELOAD=1` to the sidecar if you'd rather it load eagerly at startup (e.g. for a dedicated GPU box where idle-unload isn't needed).
+The sidecar doesn't load the model at startup — it loads lazily, on the queue manager's first `Warm` call (or on the first direct `/synthesize` call, defensively). The model then remains resident until the VRAM budget requires eviction. `AUDIO_AUDIOCPP_IDLE_UNLOAD` defaults to `0`; set a positive number to additionally unload a model after that many idle seconds. `AUDIO_OMNIVOICE_CONCURRENCY` (default **1**) caps how many OmniVoice jobs run at once.
 
 ### Routing
 
@@ -179,7 +179,7 @@ type Provider interface {
 }
 ```
 
-It's intentionally not `provider.Provider` — the request/result shapes differ (audio bytes + language in, text out), and **STT doesn't route through `internal/queue`** the way TTS does. That queue exists to solve a specific problem: GPU model lifecycle for slow, VRAM-heavy generation where callers benefit from seeing queue position. Transcription requests are typically one quick round trip, so `internal/server.transcriptions` calls `Transcribe` directly and synchronously, bounded by the same `AUDIO_REQUEST_TIMEOUT_SECONDS`. If STT ever needs the same queue treatment (e.g. a much larger Whisper model that's slow enough to want queuing), that's a deliberate follow-up, not something papered over here.
+It's intentionally not `provider.Provider` — the request/result shapes differ (audio bytes + language in, text out), and STT doesn't route through `internal/queue` the way TTS does. `internal/server.transcriptions` calls `Transcribe` directly and synchronously, bounded by `AUDIO_REQUEST_TIMEOUT_SECONDS`. CUDA STT still acquires the same lifecycle execution lease as CUDA TTS, so inference is serialized without forcing resident models to unload.
 
 Registered via `server.Config.SttProviders` / `DefaultSttProvider` — entirely optional; `POST /v1/audio/transcriptions` returns `503` if none are configured.
 
@@ -200,8 +200,8 @@ provider is started.
 
 Parakeet-TDT 0.6B v3 is the default STT provider in `config.yml`. It supports
 25 European languages with automatic language detection. The lifecycle manager
-starts its CUDA sidecar on the first request and treats it as exclusive with
-the other `audio.cpp` GPU models. The checked-in sidecar configuration uses
+starts its CUDA sidecar on the first request and keeps it resident alongside
+other models when the configured VRAM budget allows. The checked-in sidecar configuration uses
 Q8_0 matrix weights and buffered streaming with 2-second center and right-
 context windows. `stream=true` exposes its cumulative partial transcripts as
 SSE.
@@ -226,8 +226,8 @@ removing Parakeet, or send `model=nemotron` on an individual request.
 
 The checked-in configuration enables it at `http://127.0.0.1:8030` with
 `large-v3`, CUDA, and INT8 quantization. The Go server launches the Python
-sidecar on the first request and stops every other registered GPU process
-beforehand. Run the sidecar independently only for development:
+sidecar on the first request and keeps it co-resident when the configured VRAM
+budget permits. Run the sidecar independently only for development:
 
 ```bash
 pip install faster-whisper torch
@@ -235,7 +235,7 @@ pip install faster-whisper torch
 ```
 
 **Model lifecycle:** the Go lifecycle manager owns the sidecar process and
-places it in the same exclusive GPU group as OmniVoice, Supertonic, Parakeet,
+accounts for it in the same VRAM budget as OmniVoice, Supertonic, Parakeet,
 and Nemotron. Its internal idle unload is disabled in managed mode; stopping
 the process releases both the model and CTranslate2 CUDA allocations. In
 standalone mode, the sidecar retains its own 60-second idle-unload default.

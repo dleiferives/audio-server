@@ -89,6 +89,9 @@ type Config struct {
 	// ResourceSwitchDelay is the quiet period after one provider in a resource
 	// group becomes idle before another provider may take the resource.
 	ResourceSwitchDelay map[string]time.Duration
+	// RunGate optionally acquires a shared execution resource for the complete
+	// provider warm-up and synthesis call. The returned function releases it.
+	RunGate func(providerID string) (func(), error)
 	// Now is injectable for tests; defaults to time.Now.
 	Now func() time.Time
 }
@@ -112,6 +115,7 @@ type Manager struct {
 	synthesizeTimeout time.Duration
 	jobTTL            time.Duration
 	now               func() time.Time
+	runGate           func(string) (func(), error)
 }
 
 type resourceState struct {
@@ -146,6 +150,7 @@ func NewManager(cfg Config) *Manager {
 		synthesizeTimeout: cfg.SynthesizeTimeout,
 		jobTTL:            jobTTL,
 		now:               now,
+		runGate:           cfg.RunGate,
 	}
 	for providerID, group := range cfg.ResourceGroups {
 		if _, ok := m.providers[providerID]; !ok || group == "" {
@@ -425,6 +430,16 @@ func (m *Manager) dequeue(providerID string) *Job {
 
 func (m *Manager) run(providerID string, job *Job) {
 	defer m.releaseResource(providerID)
+	if m.runGate != nil {
+		release, err := m.runGate(providerID)
+		if err != nil {
+			m.finish(providerID, job, provider.SpeechResult{}, fmt.Errorf("execution resource unavailable: %w", err))
+			return
+		}
+		if release != nil {
+			defer release()
+		}
+	}
 
 	m.mu.Lock()
 	p := m.providers[providerID]

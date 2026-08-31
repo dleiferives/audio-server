@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -126,6 +127,48 @@ func TestSubmitAndWaitSucceeds(t *testing.T) {
 	}
 	if got.Status != StatusSucceeded || string(got.Result.Audio) != "hello" {
 		t.Fatalf("unexpected job: %+v", got)
+	}
+}
+
+func TestRunGateWrapsSynthesis(t *testing.T) {
+	p := &fakeProvider{id: "gpu"}
+	acquired := false
+	released := false
+	m := NewManager(Config{
+		Providers: map[string]provider.Provider{"gpu": p},
+		RunGate: func(id string) (func(), error) {
+			if id != "gpu" {
+				t.Fatalf("gate provider = %q", id)
+			}
+			acquired = true
+			return func() { released = true }, nil
+		},
+	})
+	job, _ := m.Submit("gpu", provider.SpeechRequest{Input: "hello"})
+	result, err := m.Wait(context.Background(), job.ID)
+	if err != nil || result.Status != StatusSucceeded {
+		t.Fatalf("job failed: result=%+v err=%v", result, err)
+	}
+	if !acquired || !released {
+		t.Fatalf("gate lifecycle acquired=%v released=%v", acquired, released)
+	}
+}
+
+func TestRunGateFailureSkipsSynthesis(t *testing.T) {
+	p := &fakeProvider{id: "gpu"}
+	m := NewManager(Config{
+		Providers: map[string]provider.Provider{"gpu": p},
+		RunGate: func(string) (func(), error) {
+			return nil, errors.New("no VRAM")
+		},
+	})
+	job, _ := m.Submit("gpu", provider.SpeechRequest{Input: "hello"})
+	result, err := m.Wait(context.Background(), job.ID)
+	if err != nil || result.Status != StatusFailed || !strings.Contains(result.Err.Error(), "no VRAM") {
+		t.Fatalf("unexpected result=%+v err=%v", result, err)
+	}
+	if p.callCount() != 0 {
+		t.Fatal("provider ran after gate acquisition failed")
 	}
 }
 

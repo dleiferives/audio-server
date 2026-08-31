@@ -14,7 +14,7 @@
   <section class="overview">
     <h2>How requests flow</h2>
     <div class="flow">client → audio-server → validation/routing → provider queue or STT dispatch → local process / managed CUDA sidecar</div>
-    <p>TTS requests can block for a result, stream bytes, or return an asynchronous job. GPU providers share one exclusive lifecycle group: the selected sidecar starts on demand and the previous model is stopped to release VRAM. STT uploads are automatically normalized to each provider's required audio format. Provider capabilities and voices are discoverable at runtime.</p>
+    <p>TTS requests can block for a result, stream bytes, or return an asynchronous job. CUDA providers share one execution lease; models stay resident together while they fit the configured VRAM budget, with idle LRU eviction when space is needed. STT uploads are automatically normalized to each provider's required audio format. Provider capabilities and voices are discoverable at runtime.</p>
     <p>Use <code>Authorization: Bearer …</code> or <code>X-API-Key: …</code> when authentication is configured. Health and these documentation endpoints are public. See the <a href="/openapi.json">OpenAPI 3.1 JSON</a> and the repository's <code>docs/api.md</code> for the conceptual guide.</p>
   </section>
   <section class="toolbar">
