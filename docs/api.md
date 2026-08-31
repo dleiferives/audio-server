@@ -2,6 +2,11 @@
 
 The server exposes an OpenAI-compatible TTS API on `http://127.0.0.1:8010` by default.
 
+The running server also exposes the machine-readable OpenAPI 3.1 contract at
+`/openapi.json` and a self-contained interactive explorer at `/docs`. This file
+is the longer conceptual guide; the OpenAPI document is the authoritative
+operation and schema reference.
+
 ## Endpoints
 
 ### `GET /healthz`

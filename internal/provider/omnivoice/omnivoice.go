@@ -151,6 +151,7 @@ type Options struct {
 	GuidanceScale  float64 `json:"guidance_scale,omitempty"`
 	VoiceRef       string  `json:"voice_ref,omitempty"`
 	ReferenceText  string  `json:"reference_text,omitempty"`
+	Seed           int     `json:"seed,omitempty"`
 	ChunkSeconds   float64 `json:"chunk_seconds,omitempty"`
 	ChunkThreshold float64 `json:"chunk_threshold,omitempty"`
 }
@@ -159,6 +160,7 @@ func parseOptions(raw json.RawMessage) (Options, error) {
 	opts := Options{
 		Steps:         defaultSteps,
 		GuidanceScale: 2.0,
+		Seed:          42,
 	}
 	if len(raw) == 0 {
 		return opts, nil
@@ -172,6 +174,30 @@ func parseOptions(raw json.RawMessage) (Options, error) {
 		return Options{}, fmt.Errorf("%w: provider_options.steps must be at least 1", provider.ErrInvalidRequest)
 	}
 	return opts, nil
+}
+
+func sidecarOptions(opts Options) map[string]any {
+	options := map[string]any{
+		"num_inference_steps": opts.Steps,
+		"guidance_scale":      opts.GuidanceScale,
+		"seed":                opts.Seed,
+	}
+	if opts.Instruct != "" {
+		options["instruct"] = opts.Instruct
+	}
+	if opts.VoiceRef != "" {
+		options["voice_ref"] = opts.VoiceRef
+	}
+	if opts.ReferenceText != "" {
+		options["reference_text"] = opts.ReferenceText
+	}
+	if opts.ChunkSeconds > 0 {
+		options["audio_chunk_duration"] = opts.ChunkSeconds
+	}
+	if opts.ChunkThreshold > 0 {
+		options["audio_chunk_threshold"] = opts.ChunkThreshold
+	}
+	return options
 }
 
 // speechRequest matches the OpenAI-compatible JSON body that audiocpp_server expects.
@@ -222,22 +248,7 @@ func (p Provider) Synthesize(ctx context.Context, req provider.SpeechRequest) (p
 		return provider.SpeechResult{}, err
 	}
 
-	options := map[string]any{}
-	if opts.Steps > 0 {
-		options["num_inference_steps"] = opts.Steps
-	}
-	if opts.GuidanceScale > 0 {
-		options["guidance_scale"] = opts.GuidanceScale
-	}
-	if opts.Instruct != "" {
-		options["instruct"] = opts.Instruct
-	}
-	if opts.VoiceRef != "" {
-		options["voice_ref"] = opts.VoiceRef
-	}
-	if opts.ReferenceText != "" {
-		options["reference_text"] = opts.ReferenceText
-	}
+	options := sidecarOptions(opts)
 
 	sidecarFormat := ""
 	streamFormat := ""
@@ -356,19 +367,9 @@ func (p Provider) SynthesizeStream(ctx context.Context, req provider.SpeechReque
 		return err
 	}
 
-	options := map[string]any{
-		"text_chunk_size": 200,
-		"text_chunk_mode": "tag_aware",
-	}
-	if opts.Steps > 0 {
-		options["num_inference_steps"] = opts.Steps
-	}
-	if opts.GuidanceScale > 0 {
-		options["guidance_scale"] = opts.GuidanceScale
-	}
-	if opts.Instruct != "" {
-		options["instruct"] = opts.Instruct
-	}
+	options := sidecarOptions(opts)
+	options["text_chunk_size"] = 200
+	options["text_chunk_mode"] = "tag_aware"
 
 	sr := speechRequest{
 		Model:          id,

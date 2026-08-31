@@ -157,7 +157,7 @@ func TestSynthesizeAppliesProviderOptions(t *testing.T) {
 
 	_, err := p.Synthesize(context.Background(), provider.SpeechRequest{
 		Input:           "hi",
-		ProviderOptions: json.RawMessage(`{"steps":8,"instruct":"female, whisper","guidance_scale":3.0}`),
+		ProviderOptions: json.RawMessage(`{"steps":8,"instruct":"female, whisper","guidance_scale":3.0,"seed":7,"voice_ref":"voice.wav","reference_text":"reference","chunk_seconds":8,"chunk_threshold":10}`),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -171,6 +171,14 @@ func TestSynthesizeAppliesProviderOptions(t *testing.T) {
 	}
 	if gotBody.Options["guidance_scale"] != 3.0 {
 		t.Fatalf("expected guidance_scale=3.0, got %v", gotBody.Options["guidance_scale"])
+	}
+	for key, want := range map[string]any{
+		"seed": 7.0, "voice_ref": "voice.wav", "reference_text": "reference",
+		"audio_chunk_duration": 8.0, "audio_chunk_threshold": 10.0,
+	} {
+		if gotBody.Options[key] != want {
+			t.Fatalf("expected %s=%v, got %v", key, want, gotBody.Options[key])
+		}
 	}
 }
 

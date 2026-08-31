@@ -29,6 +29,10 @@ brew install espeak-ng ffmpeg
 go run ./cmd/audio
 ```
 
+Open the self-contained interactive API reference at
+[`http://127.0.0.1:8010/docs`](http://127.0.0.1:8010/docs), or consume the
+OpenAPI 3.1 contract from `http://127.0.0.1:8010/openapi.json`.
+
 ## Build
 
 ```bash

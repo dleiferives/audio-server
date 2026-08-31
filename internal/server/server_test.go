@@ -369,6 +369,26 @@ func TestTranscriptionsWithoutProvidersReturns503(t *testing.T) {
 	}
 }
 
+func TestAPIDocumentationEndpointsArePublic(t *testing.T) {
+	s := newTestServer(t, fakeProvider{}, Config{APIKey: "secret"})
+	for _, tt := range []struct {
+		path        string
+		contentType string
+		contains    string
+	}{
+		{"/openapi.json", "application/vnd.oai.openapi+json", `"openapi": "3.1.0"`},
+		{"/docs", "text/html", "audio-server API"},
+		{"/docs/", "text/html", "Send request"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+		rr := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK || !strings.Contains(rr.Header().Get("Content-Type"), tt.contentType) || !strings.Contains(rr.Body.String(), tt.contains) {
+			t.Errorf("GET %s: status=%d content-type=%q body=%q", tt.path, rr.Code, rr.Header().Get("Content-Type"), rr.Body.String())
+		}
+	}
+}
+
 func TestTranscriptionsReturnsText(t *testing.T) {
 	var gotAudio []byte
 	var gotLanguage string

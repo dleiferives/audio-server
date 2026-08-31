@@ -1,0 +1,191 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "audio-server API",
+    "version": "1.0.0",
+    "summary": "Local OpenAI-compatible speech, transcription, and alignment service",
+    "description": "audio-server routes TTS and STT requests to local subprocesses and lifecycle-managed CPU/CUDA sidecars. TTS providers have independent FIFO queues; GPU providers share an exclusive lifecycle group and start on demand. STT uploads are normalized to the selected provider's declared input format. Use the capabilities and voices endpoints instead of hard-coding the runtime catalog."
+  },
+  "externalDocs": {"description": "Conceptual API guide", "url": "https://github.com/dleiferives/audio-server/blob/trunk/docs/api.md"},
+  "servers": [{"url": "/", "description": "This audio-server instance"}],
+  "tags": [
+    {"name": "System", "description": "Health, documentation, and runtime discovery."},
+    {"name": "Speech", "description": "Synchronous, streaming, and asynchronous text-to-speech."},
+    {"name": "Transcription", "description": "Buffered and SSE speech-to-text. Uploaded audio is normalized automatically when required."},
+    {"name": "Alignment", "description": "Asynchronous Montreal Forced Aligner workflows. Routes exist only when alignment is enabled."}
+  ],
+  "security": [{"bearerAuth": []}, {"apiKey": []}],
+  "paths": {
+    "/docs": {
+      "get": {"tags": ["System"], "operationId": "getApiDocs", "summary": "Interactive API documentation", "security": [], "responses": {"200": {"description": "Self-contained HTML API explorer", "content": {"text/html": {"schema": {"type": "string"}}}}}}
+    },
+    "/openapi.json": {
+      "get": {"tags": ["System"], "operationId": "getOpenApi", "summary": "OpenAPI 3.1 document", "security": [], "responses": {"200": {"description": "Machine-readable API contract", "content": {"application/vnd.oai.openapi+json": {"schema": {"type": "object"}}}}}}
+    },
+    "/healthz": {
+      "get": {
+        "tags": ["System"], "operationId": "getHealth", "summary": "Check server and provider health", "security": [],
+        "description": "Lifecycle-managed providers may report `cold`; this means ready to start on demand and does not make the server unhealthy.",
+        "responses": {
+          "200": {"description": "Server is healthy", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HealthResponse"}, "example": {"status": "ok", "providers": {"espeak-ng": "ok", "parakeet": "cold"}}}}},
+          "503": {"description": "A required provider is unavailable", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HealthResponse"}}}}
+        }
+      }
+    },
+    "/v1/audio/capabilities": {
+      "get": {
+        "tags": ["System"], "operationId": "listCapabilities", "summary": "List TTS providers, languages, and voices",
+        "description": "Returns the live catalog from registered providers. Use this to populate clients and then filter voices by language.",
+        "responses": {"200": {"description": "Runtime capability catalog", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CapabilitiesResponse"}}}}, "401": {"$ref": "#/components/responses/Unauthorized"}, "503": {"$ref": "#/components/responses/Unavailable"}}
+      }
+    },
+    "/v1/audio/voices": {
+      "get": {
+        "tags": ["System"], "operationId": "listVoices", "summary": "List voices for a provider and language",
+        "parameters": [
+          {"name": "provider", "in": "query", "description": "Provider ID; defaults to the configured TTS provider.", "schema": {"type": "string", "examples": ["espeak-ng", "supertonic", "omnivoice"]}},
+          {"name": "language", "in": "query", "description": "BCP-47 language tag or `auto`.", "schema": {"type": "string", "example": "en"}}
+        ],
+        "responses": {"200": {"description": "Compatible voices", "content": {"application/json": {"schema": {"type": "object", "required": ["voices"], "properties": {"voices": {"type": "array", "items": {"$ref": "#/components/schemas/Voice"}}}}}}}, "400": {"$ref": "#/components/responses/BadRequest"}, "401": {"$ref": "#/components/responses/Unauthorized"}, "503": {"$ref": "#/components/responses/Unavailable"}}
+      }
+    },
+    "/v1/audio/speech": {
+      "post": {
+        "tags": ["Speech"], "operationId": "createSpeech", "summary": "Generate or stream speech",
+        "description": "Submits to the selected provider queue and waits for audio. With `stream: true`, capable providers flush audio progressively. A disconnected buffered request does not cancel its queued job; a disconnected live stream does.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SpeechRequest"}, "example": {"model": "tts-1", "input": "Hello from audio-server.", "voice": "auto", "language": "en", "response_format": "mp3", "speed": 1}}}},
+        "responses": {"200": {"$ref": "#/components/responses/Audio"}, "400": {"$ref": "#/components/responses/BadRequest"}, "401": {"$ref": "#/components/responses/Unauthorized"}, "503": {"$ref": "#/components/responses/Unavailable"}, "504": {"$ref": "#/components/responses/Timeout"}}
+      }
+    },
+    "/v1/audio/jobs": {
+      "post": {
+        "tags": ["Speech"], "operationId": "createSpeechJob", "summary": "Queue an asynchronous speech job",
+        "description": "Returns immediately with a pollable job. `stream` must be false; use the synchronous speech endpoint for a live response.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SpeechRequest"}, "example": {"model": "omnivoice", "input": "A queued request.", "voice": "auto", "response_format": "wav"}}}},
+        "responses": {"202": {"description": "Job accepted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}}, "400": {"$ref": "#/components/responses/BadRequest"}, "401": {"$ref": "#/components/responses/Unauthorized"}, "503": {"$ref": "#/components/responses/Unavailable"}}
+      }
+    },
+    "/v1/audio/jobs/{id}": {
+      "get": {
+        "tags": ["Speech"], "operationId": "getSpeechJob", "summary": "Poll a speech or alignment job",
+        "parameters": [{"$ref": "#/components/parameters/JobId"}],
+        "responses": {"200": {"description": "Current job state", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}}, "401": {"$ref": "#/components/responses/Unauthorized"}, "404": {"$ref": "#/components/responses/NotFound"}}
+      }
+    },
+    "/v1/audio/jobs/{id}/audio": {
+      "get": {
+        "tags": ["Speech"], "operationId": "getSpeechJobAudio", "summary": "Download completed job audio",
+        "parameters": [{"$ref": "#/components/parameters/JobId"}],
+        "responses": {"200": {"$ref": "#/components/responses/Audio"}, "401": {"$ref": "#/components/responses/Unauthorized"}, "404": {"$ref": "#/components/responses/NotFound"}, "409": {"$ref": "#/components/responses/Conflict"}}
+      }
+    },
+    "/v1/audio/jobs/{id}/stream": {
+      "get": {
+        "tags": ["Speech"], "operationId": "streamSpeechJob", "summary": "Follow live PCM chunks or replay completed PCM",
+        "description": "For a running streaming job, the connection receives chunks until completion. For a completed job, stored PCM is replayed.",
+        "parameters": [{"$ref": "#/components/parameters/JobId"}],
+        "responses": {"200": {"description": "Raw PCM audio stream", "content": {"audio/pcm": {"schema": {"type": "string", "format": "binary"}}}}, "401": {"$ref": "#/components/responses/Unauthorized"}, "404": {"$ref": "#/components/responses/NotFound"}, "409": {"$ref": "#/components/responses/Conflict"}}
+      }
+    },
+    "/v1/audio/transcriptions": {
+      "post": {
+        "tags": ["Transcription"], "operationId": "createTranscription", "summary": "Transcribe an audio upload",
+        "description": "OpenAI-compatible multipart STT. Common ffmpeg-supported containers are accepted. Parakeet, Nemotron, and Qwen3-ASR uploads are normalized to mono 16 kHz PCM WAV automatically. Set `stream=true` for SSE partials on a streaming-capable provider.",
+        "requestBody": {"required": true, "content": {"multipart/form-data": {"schema": {"$ref": "#/components/schemas/TranscriptionRequest"}}}},
+        "responses": {
+          "200": {"description": "JSON/text transcript, or SSE events when streaming", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TranscriptionResponse"}}, "text/plain": {"schema": {"type": "string"}}, "text/event-stream": {"schema": {"type": "string"}, "example": "data: {\"type\":\"transcript.text.delta\",\"delta\":\"hello\"}\n\ndata: {\"type\":\"transcript.text.done\",\"text\":\"hello\"}\n\ndata: [DONE]\n\n"}}},
+          "400": {"$ref": "#/components/responses/BadRequest"}, "401": {"$ref": "#/components/responses/Unauthorized"}, "503": {"$ref": "#/components/responses/Unavailable"}, "504": {"$ref": "#/components/responses/Timeout"}
+        }
+      }
+    },
+    "/v1/audio/alignments": {
+      "post": {
+        "tags": ["Alignment"], "operationId": "createAlignment", "summary": "Queue forced alignment",
+        "description": "Available only when MFA alignment is configured. Returns a job immediately.",
+        "requestBody": {"required": true, "content": {"multipart/form-data": {"schema": {"$ref": "#/components/schemas/AlignmentRequest"}}}},
+        "responses": {"202": {"description": "Alignment job accepted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}}, "400": {"$ref": "#/components/responses/BadRequest"}, "401": {"$ref": "#/components/responses/Unauthorized"}, "503": {"$ref": "#/components/responses/Unavailable"}}
+      }
+    },
+    "/v1/audio/alignments/models": {
+      "get": {"tags": ["Alignment"], "operationId": "listAlignmentModels", "summary": "List configured alignment languages", "responses": {"200": {"description": "Language codes", "content": {"application/json": {"schema": {"type": "object", "required": ["languages"], "properties": {"languages": {"type": "array", "items": {"type": "string"}}}}}}}, "401": {"$ref": "#/components/responses/Unauthorized"}}}
+    },
+    "/v1/audio/alignments/{id}": {
+      "get": {"tags": ["Alignment"], "operationId": "getAlignment", "summary": "Poll alignment status and inline result", "parameters": [{"$ref": "#/components/parameters/JobId"}], "responses": {"200": {"description": "Job state; completed alignment may be in `result`", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}}, "401": {"$ref": "#/components/responses/Unauthorized"}, "404": {"$ref": "#/components/responses/NotFound"}}}
+    },
+    "/v1/audio/alignments/{id}/result": {
+      "get": {"tags": ["Alignment"], "operationId": "getAlignmentResult", "summary": "Fetch completed alignment output", "parameters": [{"$ref": "#/components/parameters/JobId"}], "responses": {"200": {"description": "Provider-defined word/phone alignment JSON", "content": {"application/json": {"schema": {"type": "object", "additionalProperties": true}}}}, "401": {"$ref": "#/components/responses/Unauthorized"}, "404": {"$ref": "#/components/responses/NotFound"}, "409": {"$ref": "#/components/responses/Conflict"}}}
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {"type": "http", "scheme": "bearer", "description": "Value of AUDIO_API_KEY as a bearer token."},
+      "apiKey": {"type": "apiKey", "in": "header", "name": "X-API-Key", "description": "Alternative API-key header."}
+    },
+    "parameters": {
+      "JobId": {"name": "id", "in": "path", "required": true, "description": "Opaque job identifier returned when the job was created.", "schema": {"type": "string"}}
+    },
+    "responses": {
+      "Audio": {"description": "Generated audio. X-TTS-Provider, X-TTS-Model, X-TTS-Voice, and X-TTS-Format identify the resolved output.", "headers": {"X-TTS-Provider": {"schema": {"type": "string"}}, "X-TTS-Model": {"schema": {"type": "string"}}, "X-TTS-Voice": {"schema": {"type": "string"}}, "X-TTS-Format": {"schema": {"type": "string"}}}, "content": {"audio/mpeg": {"schema": {"type": "string", "format": "binary"}}, "audio/wav": {"schema": {"type": "string", "format": "binary"}}, "audio/ogg": {"schema": {"type": "string", "format": "binary"}}, "audio/flac": {"schema": {"type": "string", "format": "binary"}}, "audio/pcm": {"schema": {"type": "string", "format": "binary"}}}},
+      "BadRequest": {"description": "Invalid request", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "Unauthorized": {"description": "Missing or invalid configured API key", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "NotFound": {"description": "Unknown or expired resource", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "Conflict": {"description": "Resource exists but is not ready for this operation", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "Unavailable": {"description": "Provider unavailable or not configured", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+      "Timeout": {"description": "Request deadline exceeded", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+    },
+    "schemas": {
+      "Error": {"type": "object", "required": ["error"], "properties": {"error": {"type": "string"}}, "example": {"error": "invalid audio request: input is required"}},
+      "HealthResponse": {"type": "object", "required": ["status", "providers"], "properties": {"status": {"type": "string", "enum": ["ok", "unhealthy"]}, "providers": {"type": "object", "additionalProperties": {"type": "string"}}}},
+      "Voice": {"type": "object", "required": ["provider", "voice", "language", "name"], "properties": {"provider": {"type": "string"}, "voice": {"type": "string"}, "language": {"type": "string"}, "name": {"type": "string"}, "gender": {"type": "string"}}},
+      "ProviderCapabilities": {"type": "object", "required": ["provider", "languages", "voices"], "properties": {"provider": {"type": "string"}, "languages": {"type": "array", "items": {"type": "string"}}, "voices": {"type": "array", "items": {"$ref": "#/components/schemas/Voice"}}}},
+      "CapabilitiesResponse": {"type": "object", "required": ["languages", "providers"], "properties": {"languages": {"type": "array", "items": {"type": "string"}}, "providers": {"type": "array", "items": {"$ref": "#/components/schemas/ProviderCapabilities"}}}},
+      "SpeechRequest": {
+        "type": "object", "required": ["input"], "additionalProperties": false,
+        "properties": {
+          "model": {"type": "string", "default": "tts-1", "description": "Provider ID or OpenAI alias: tts-1, tts-1-hd, gpt-4o-mini-tts, or auto."},
+          "input": {"type": "string", "minLength": 1, "description": "Text to synthesize; limited by AUDIO_MAX_INPUT_CHARS."},
+          "voice": {"type": "string", "default": "auto", "description": "Canonical provider voice or auto."},
+          "language": {"type": "string", "default": "auto", "description": "BCP-47 language or auto."},
+          "response_format": {"type": "string", "enum": ["mp3", "wav", "ogg", "opus", "flac", "pcm"], "default": "mp3"},
+          "speed": {"type": "number", "minimum": 0.25, "maximum": 4, "default": 1},
+          "stream": {"type": "boolean", "default": false},
+          "provider_options": {"$ref": "#/components/schemas/ProviderOptions"}
+        }
+      },
+      "ProviderOptions": {
+        "type": "object", "description": "Provider-owned options. Unsupported keys are rejected. OmniVoice supports the fields below; other provider schemas may differ.",
+        "properties": {
+          "steps": {"type": "integer", "minimum": 1, "default": 32},
+          "instruct": {"type": "string", "description": "Natural-language voice-design instruction."},
+          "guidance_scale": {"type": "number", "exclusiveMinimum": 0, "default": 2},
+          "voice_ref": {"type": "string", "description": "Path/reference understood by the managed provider."},
+          "reference_text": {"type": "string"},
+          "chunk_seconds": {"type": "number", "exclusiveMinimum": 0, "default": 12},
+          "chunk_threshold": {"type": "number", "exclusiveMinimum": 0, "default": 18},
+          "seed": {"type": "integer", "default": 42}
+        }
+      },
+      "Job": {
+        "type": "object", "required": ["id", "status", "provider", "created_at", "queue_position"],
+        "properties": {
+          "id": {"type": "string"}, "status": {"type": "string", "enum": ["queued", "running", "succeeded", "failed"]}, "provider": {"type": "string"},
+          "created_at": {"type": "string", "format": "date-time"}, "started_at": {"type": "string", "format": "date-time"}, "finished_at": {"type": "string", "format": "date-time"},
+          "queue_position": {"type": "integer", "minimum": 0}, "stream_chunks": {"type": "integer", "minimum": 0}, "error": {"type": "string"},
+          "result": {"type": "object", "additionalProperties": true, "description": "Present inline for completed alignment jobs."}
+        }
+      },
+      "TranscriptionRequest": {
+        "type": "object", "required": ["file"],
+        "properties": {
+          "file": {"type": "string", "format": "binary", "description": "WAV, MP3, Ogg/Opus, FLAC, M4A, or another ffmpeg-decodable audio file."},
+          "model": {"type": "string", "default": "auto", "description": "parakeet, nemotron, qwen3-asr-0.6b, qwen3-asr-1.7b, faster-whisper, whisper-1, or auto."},
+          "language": {"type": "string", "description": "Optional ISO-639-1/BCP-47 hint."},
+          "response_format": {"type": "string", "enum": ["json", "text"], "default": "json"},
+          "stream": {"type": "boolean", "default": false}
+        }
+      },
+      "TranscriptionResponse": {"type": "object", "required": ["text"], "properties": {"text": {"type": "string"}}, "example": {"text": "The quick brown fox jumps over the lazy dog."}},
+      "AlignmentRequest": {"type": "object", "required": ["file", "transcript", "language"], "properties": {"file": {"type": "string", "format": "binary"}, "transcript": {"type": "string"}, "language": {"type": "string", "description": "A code returned by /v1/audio/alignments/models."}}}
+    }
+  }
+}

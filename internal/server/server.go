@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/dleiferives/audio-server/internal/apidocs"
 	"github.com/dleiferives/audio-server/internal/provider"
 	"github.com/dleiferives/audio-server/internal/queue"
 	"github.com/dleiferives/audio-server/internal/store"
@@ -169,6 +170,9 @@ func New(cfg Config) (*Server, error) {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /openapi.json", apidocs.OpenAPI)
+	mux.HandleFunc("GET /docs", apidocs.UI)
+	mux.HandleFunc("GET /docs/", apidocs.UI)
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /v1/audio/capabilities", s.auth(s.capabilities))
 	mux.HandleFunc("GET /v1/audio/voices", s.auth(s.voices))
