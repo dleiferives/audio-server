@@ -329,6 +329,7 @@ func (m *Manager) CompleteJob(id string, result provider.SpeechResult) {
 	j.FinishedAt = m.now()
 	j.Status = StatusSucceeded
 	j.Result = result
+	clearEphemeralRequest(j)
 	close(j.done)
 	if j.StreamBus != nil {
 		close(j.StreamBus)
@@ -347,6 +348,7 @@ func (m *Manager) FailJob(id string, err error) {
 	j.FinishedAt = m.now()
 	j.Status = StatusFailed
 	j.Err = err
+	clearEphemeralRequest(j)
 	close(j.done)
 	if j.StreamBus != nil {
 		close(j.StreamBus)
@@ -604,12 +606,19 @@ func (m *Manager) finish(providerID string, job *Job, result provider.SpeechResu
 		job.Status = StatusSucceeded
 		job.Result = result
 	}
+	clearEphemeralRequest(job)
 	close(job.done)
 	m.active[providerID]--
 	if m.active[providerID] == 0 && len(m.queues[providerID]) == 0 {
 		m.startIdleTimerLocked(providerID)
 	}
 	m.mu.Unlock()
+}
+
+func clearEphemeralRequest(job *Job) {
+	job.Request.SpeakerReference = nil
+	job.Request.SpeakerReferenceFilename = ""
+	job.Request.SpeakerReferenceText = ""
 }
 
 // startIdleTimerLocked must be called with m.mu held.

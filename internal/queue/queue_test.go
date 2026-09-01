@@ -130,6 +130,25 @@ func TestSubmitAndWaitSucceeds(t *testing.T) {
 	}
 }
 
+func TestFinishedJobReleasesUploadedSpeakerReference(t *testing.T) {
+	p := &fakeProvider{id: "fake"}
+	m := NewManager(Config{Providers: map[string]provider.Provider{"fake": p}})
+	job, err := m.Submit("fake", provider.SpeechRequest{
+		Input: "hello", SpeakerReference: []byte("large-upload"),
+		SpeakerReferenceFilename: "speaker.wav", SpeakerReferenceText: "spoken text",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished, err := m.Wait(context.Background(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(finished.Request.SpeakerReference) != 0 || finished.Request.SpeakerReferenceFilename != "" || finished.Request.SpeakerReferenceText != "" {
+		t.Fatalf("ephemeral reference retained after completion: %+v", finished.Request)
+	}
+}
+
 func TestRunGateWrapsSynthesis(t *testing.T) {
 	p := &fakeProvider{id: "gpu"}
 	acquired := false
