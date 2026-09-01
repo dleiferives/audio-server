@@ -8,8 +8,28 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/dleiferives/audio-server/internal/provider"
 	"github.com/dleiferives/audio-server/internal/sttprovider"
 )
+
+// NormalizeReferenceAudio decodes an uploaded TTS reference into the WAV
+// format accepted by native audio.cpp voice-cloning providers.
+func (f FFmpeg) NormalizeReferenceAudio(ctx context.Context, audio []byte) ([]byte, error) {
+	normalized, err := f.NormalizeAudio(ctx, audio, sttprovider.AudioFormat{
+		Container: "wav", Codec: "pcm_s16le", SampleRate: 24000, Channels: 1,
+	})
+	if err == nil {
+		return normalized.Audio, nil
+	}
+	switch {
+	case errors.Is(err, sttprovider.ErrInvalidRequest):
+		return nil, fmt.Errorf("%w: invalid speaker reference audio: %v", provider.ErrInvalidRequest, err)
+	case errors.Is(err, sttprovider.ErrUnsupportedFormat):
+		return nil, fmt.Errorf("%w: speaker reference audio: %v", provider.ErrUnsupportedFormat, err)
+	default:
+		return nil, fmt.Errorf("%w: speaker reference normalization failed: %v", provider.ErrUnavailable, err)
+	}
+}
 
 // NormalizeAudio converts an upload to a provider's canonical input format.
 // The current STT providers use mono 16-bit PCM WAV at 16 kHz, but the command

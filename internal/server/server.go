@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -491,9 +493,10 @@ func (s *Server) voices(w http.ResponseWriter, r *http.Request) {
 }
 
 type providerCapabilities struct {
-	Provider  string           `json:"provider"`
-	Languages []string         `json:"languages"`
-	Voices    []provider.Voice `json:"voices"`
+	Provider       string           `json:"provider"`
+	Languages      []string         `json:"languages"`
+	Voices         []provider.Voice `json:"voices"`
+	ReferenceModes []string         `json:"reference_modes,omitempty"`
 }
 
 // capabilities exposes the complete TTS catalog known by this audio-server.
@@ -527,10 +530,21 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 			languages = appendLanguage(languages, "auto")
 			allLanguages["auto"] = true
 		}
+		referenceModes := []string(nil)
+		if capable, ok := p.(provider.ReferenceAudioProvider); ok {
+			capabilities := capable.ReferenceAudioCapabilities()
+			if capabilities.CombinedSpeakerEmotion {
+				referenceModes = append(referenceModes, "combined")
+			}
+			if capabilities.SeparateEmotion {
+				referenceModes = append(referenceModes, "separate")
+			}
+		}
 		providers = append(providers, providerCapabilities{
-			Provider:  id,
-			Languages: languages,
-			Voices:    voices,
+			Provider:       id,
+			Languages:      languages,
+			Voices:         voices,
+			ReferenceModes: referenceModes,
 		})
 	}
 
@@ -955,18 +969,9 @@ func (s *Server) jobStatusBody(id string) map[string]any {
 // the provider it should run on. On failure it writes the error response and
 // returns ok=false.
 func (s *Server) decodeAndRoute(w http.ResponseWriter, r *http.Request) (provider.SpeechRequest, provider.Provider, bool) {
-	r.Body = http.MaxBytesReader(w, r.Body, int64(s.maxInputChars*4+4096))
-	defer r.Body.Close()
-
-	var req provider.SpeechRequest
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
+	req, err := s.decodeSpeechRequest(w, r)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
-		return provider.SpeechRequest{}, nil, false
-	}
-	if err := dec.Decode(&struct{}{}); err != io.EOF {
-		writeError(w, http.StatusBadRequest, errors.New("request body must contain one JSON object"))
 		return provider.SpeechRequest{}, nil, false
 	}
 	if err := s.validateSpeech(req); err != nil {
@@ -980,11 +985,115 @@ func (s *Server) decodeAndRoute(w http.ResponseWriter, r *http.Request) (provide
 		writeError(w, http.StatusBadRequest, errors.New("unknown audio model"))
 		return provider.SpeechRequest{}, nil, false
 	}
+	if len(req.SpeakerReference) > 0 {
+		capable, supported := p.(provider.ReferenceAudioProvider)
+		if !supported || !capable.ReferenceAudioCapabilities().CombinedSpeakerEmotion {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("audio provider %q does not support speaker reference uploads", p.ID()))
+			return provider.SpeechRequest{}, nil, false
+		}
+	}
 	if err := s.resolveVoice(r.Context(), p, &req); err != nil {
 		writeProviderError(w, err)
 		return provider.SpeechRequest{}, nil, false
 	}
 	return req, p, true
+}
+
+func (s *Server) decodeSpeechRequest(w http.ResponseWriter, r *http.Request) (provider.SpeechRequest, error) {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err == nil && mediaType == "multipart/form-data" {
+		return s.decodeMultipartSpeechRequest(w, r)
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, int64(s.maxInputChars*4+4096))
+	defer r.Body.Close()
+	var req provider.SpeechRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		return provider.SpeechRequest{}, err
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return provider.SpeechRequest{}, errors.New("request body must contain one JSON object")
+	}
+	return req, nil
+}
+
+func (s *Server) decodeMultipartSpeechRequest(w http.ResponseWriter, r *http.Request) (provider.SpeechRequest, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, int64(s.maxUploadBytes))
+	defer r.Body.Close()
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		return provider.SpeechRequest{}, err
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	allowedValues := map[string]bool{
+		"model": true, "input": true, "voice": true, "language": true,
+		"response_format": true, "speed": true, "stream": true,
+		"provider_options": true, "speaker_reference_text": true,
+	}
+	for name, values := range r.MultipartForm.Value {
+		if !allowedValues[name] {
+			return provider.SpeechRequest{}, fmt.Errorf("unknown multipart field %q", name)
+		}
+		if len(values) > 1 {
+			return provider.SpeechRequest{}, fmt.Errorf("multipart field %q must appear once", name)
+		}
+	}
+	for name, files := range r.MultipartForm.File {
+		if name == "emotion_reference" {
+			return provider.SpeechRequest{}, errors.New("separate emotion_reference uploads are not supported yet")
+		}
+		if name != "speaker_reference" {
+			return provider.SpeechRequest{}, fmt.Errorf("unknown multipart file field %q", name)
+		}
+		if len(files) != 1 {
+			return provider.SpeechRequest{}, errors.New("speaker_reference must contain one file")
+		}
+	}
+
+	req := provider.SpeechRequest{
+		Model: r.FormValue("model"), Input: r.FormValue("input"), Voice: r.FormValue("voice"),
+		Language: r.FormValue("language"), ResponseFormat: r.FormValue("response_format"),
+		SpeakerReferenceText: r.FormValue("speaker_reference_text"),
+	}
+	if raw := strings.TrimSpace(r.FormValue("provider_options")); raw != "" {
+		req.ProviderOptions = json.RawMessage(raw)
+	}
+	if raw := strings.TrimSpace(r.FormValue("speed")); raw != "" {
+		value, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return provider.SpeechRequest{}, errors.New("speed must be a number")
+		}
+		req.Speed = value
+	}
+	if raw := strings.TrimSpace(r.FormValue("stream")); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			return provider.SpeechRequest{}, errors.New("stream must be true or false")
+		}
+		req.Stream = value
+	}
+	if files := r.MultipartForm.File["speaker_reference"]; len(files) == 1 {
+		file, err := files[0].Open()
+		if err != nil {
+			return provider.SpeechRequest{}, err
+		}
+		req.SpeakerReference, err = io.ReadAll(file)
+		file.Close()
+		if err != nil {
+			return provider.SpeechRequest{}, err
+		}
+		if len(req.SpeakerReference) == 0 {
+			return provider.SpeechRequest{}, errors.New("speaker_reference is empty")
+		}
+		req.SpeakerReferenceFilename = files[0].Filename
+		if strings.TrimSpace(req.SpeakerReferenceText) == "" {
+			return provider.SpeechRequest{}, errors.New("speaker_reference_text is required with speaker_reference")
+		}
+	}
+	return req, nil
 }
 
 // transcriptions handles POST /v1/audio/transcriptions, an OpenAI-compatible

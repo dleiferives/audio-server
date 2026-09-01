@@ -150,6 +150,29 @@ jobs and any later poll depend on it completing.
 | `provider_options` | object | no | Provider-specific settings, opaque to the server and validated only by the resolved provider. See [`docs/providers.md`](providers.md) for each provider's schema (e.g. OmniVoice's `steps`, `seed`, `chunk_seconds`, `chunk_threshold`). Unknown fields within it are rejected by the provider, not the server. |
 | `stream` | boolean | no | Stream audio progressively instead of buffering the full result. Only honored if the resolved provider supports it (currently `espeak-ng` only) — otherwise silently falls back to the buffered response below. See "Streaming" below. |
 
+For per-request voice cloning, the same endpoint also accepts
+`multipart/form-data`. OmniVoice currently supports a combined speaker and
+emotion reference: the uploaded performance supplies both the voice identity
+and its speaking style. Common compressed audio formats are decoded by FFmpeg
+and normalized automatically.
+
+```bash
+curl -sS http://127.0.0.1:8010/v1/audio/speech \
+  -F model=omnivoice \
+  -F input='Γεια σου, πώς είσαι;' \
+  -F language=el \
+  -F response_format=wav \
+  -F speaker_reference=@reference.m4a \
+  -F speaker_reference_text='The exact words spoken in reference.m4a' \
+  -F 'provider_options={"steps":32,"seed":42}' \
+  --output cloned.wav
+```
+
+`speaker_reference_text` is required because OmniVoice conditions on the
+matching reference transcript. The upload is scoped to this request and is
+not retained as a reusable voice ID. A separate `emotion_reference` upload is
+reserved for future providers and currently returns `400`.
+
 **Response 200** — audio bytes with headers:
 
 | Header | Description |
@@ -195,7 +218,7 @@ connection open, which matters most for slow GPU-bound providers like
 OmniVoice.
 
 **Request body:** identical to `POST /v1/audio/speech` (see above), including
-`provider_options`. **`stream` is not supported here** — jobs are fetch-after-done
+multipart speaker-reference uploads and `provider_options`. **`stream` is not supported here** — jobs are fetch-after-done
 by design, and a `stream: true` job request returns `400`. Use
 `POST /v1/audio/speech` for streaming.
 

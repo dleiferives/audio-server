@@ -99,6 +99,11 @@ incremental hypotheses. The same API is available at
 `post_process_model=cohere-transcribe` query parameter explicitly requests an
 asynchronous high-accuracy final pass and returns a linked job ID.
 
+OmniVoice voice cloning accepts a per-request multipart
+`speaker_reference` upload and matching `speaker_reference_text`. The clip is
+used as a combined speaker-and-emotion reference, normalized automatically,
+and deleted after synthesis; see [the speech API](docs/api.md#post-v1audiospeech).
+
 ## List voices
 
 ```bash

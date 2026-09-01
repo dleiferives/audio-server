@@ -52,8 +52,8 @@
     "/v1/audio/speech": {
       "post": {
         "tags": ["Speech"], "operationId": "createSpeech", "summary": "Generate or stream speech",
-        "description": "Submits to the selected provider queue and waits for audio. With `stream: true`, capable providers flush audio progressively. A disconnected buffered request does not cancel its queued job; a disconnected live stream does.",
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SpeechRequest"}, "example": {"model": "tts-1", "input": "Hello from audio-server.", "voice": "auto", "language": "en", "response_format": "mp3", "speed": 1}}}},
+        "description": "Submits to the selected provider queue and waits for audio. With `stream: true`, capable providers flush audio progressively. Multipart requests may include an ephemeral combined speaker/emotion reference for providers such as OmniVoice. A disconnected buffered request does not cancel its queued job; a disconnected live stream does.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SpeechRequest"}, "example": {"model": "tts-1", "input": "Hello from audio-server.", "voice": "auto", "language": "en", "response_format": "mp3", "speed": 1}}, "multipart/form-data": {"schema": {"$ref": "#/components/schemas/MultipartSpeechRequest"}}}},
         "responses": {"200": {"$ref": "#/components/responses/Audio"}, "400": {"$ref": "#/components/responses/BadRequest"}, "401": {"$ref": "#/components/responses/Unauthorized"}, "503": {"$ref": "#/components/responses/Unavailable"}, "504": {"$ref": "#/components/responses/Timeout"}}
       }
     },
@@ -61,7 +61,7 @@
       "post": {
         "tags": ["Speech"], "operationId": "createSpeechJob", "summary": "Queue an asynchronous speech job",
         "description": "Returns immediately with a pollable job. `stream` must be false; use the synchronous speech endpoint for a live response.",
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SpeechRequest"}, "example": {"model": "omnivoice", "input": "A queued request.", "voice": "auto", "response_format": "wav"}}}},
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SpeechRequest"}, "example": {"model": "omnivoice", "input": "A queued request.", "voice": "auto", "response_format": "wav"}}, "multipart/form-data": {"schema": {"$ref": "#/components/schemas/MultipartSpeechRequest"}}}},
         "responses": {"202": {"description": "Job accepted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}}, "400": {"$ref": "#/components/responses/BadRequest"}, "401": {"$ref": "#/components/responses/Unauthorized"}, "503": {"$ref": "#/components/responses/Unavailable"}}
       }
     },
@@ -159,7 +159,7 @@
       "Error": {"type": "object", "required": ["error"], "properties": {"error": {"type": "string"}}, "example": {"error": "invalid audio request: input is required"}},
       "HealthResponse": {"type": "object", "required": ["status", "providers"], "properties": {"status": {"type": "string", "enum": ["ok", "unhealthy"]}, "providers": {"type": "object", "additionalProperties": {"type": "string"}}}},
       "Voice": {"type": "object", "required": ["provider", "voice", "language", "name"], "properties": {"provider": {"type": "string"}, "voice": {"type": "string"}, "language": {"type": "string"}, "name": {"type": "string"}, "gender": {"type": "string"}}},
-      "ProviderCapabilities": {"type": "object", "required": ["provider", "languages", "voices"], "properties": {"provider": {"type": "string"}, "languages": {"type": "array", "items": {"type": "string"}}, "voices": {"type": "array", "items": {"$ref": "#/components/schemas/Voice"}}}},
+      "ProviderCapabilities": {"type": "object", "required": ["provider", "languages", "voices"], "properties": {"provider": {"type": "string"}, "languages": {"type": "array", "items": {"type": "string"}}, "voices": {"type": "array", "items": {"$ref": "#/components/schemas/Voice"}}, "reference_modes": {"type": "array", "items": {"type": "string", "enum": ["combined", "separate"]}, "description": "Reference-audio modes natively supported by this provider."}}},
       "SttProviderCapabilities": {"type": "object", "required": ["provider", "live_streaming"], "properties": {"provider": {"type": "string"}, "live_streaming": {"type": "boolean"}}},
       "CapabilitiesResponse": {"type": "object", "required": ["languages", "providers", "stt_providers"], "properties": {"languages": {"type": "array", "items": {"type": "string"}}, "providers": {"type": "array", "items": {"$ref": "#/components/schemas/ProviderCapabilities"}}, "stt_providers": {"type": "array", "items": {"$ref": "#/components/schemas/SttProviderCapabilities"}}}},
       "SpeechRequest": {
@@ -173,6 +173,21 @@
           "speed": {"type": "number", "minimum": 0.25, "maximum": 4, "default": 1},
           "stream": {"type": "boolean", "default": false},
           "provider_options": {"$ref": "#/components/schemas/ProviderOptions"}
+        }
+      },
+      "MultipartSpeechRequest": {
+        "type": "object", "required": ["input", "speaker_reference", "speaker_reference_text"], "additionalProperties": false,
+        "properties": {
+          "model": {"type": "string", "default": "omnivoice"},
+          "input": {"type": "string"},
+          "voice": {"type": "string", "default": "auto"},
+          "language": {"type": "string", "default": "auto"},
+          "response_format": {"type": "string", "enum": ["mp3", "wav", "ogg", "opus", "flac", "pcm"], "default": "mp3"},
+          "speed": {"type": "number", "minimum": 0.25, "maximum": 4, "default": 1},
+          "stream": {"type": "boolean", "default": false},
+          "provider_options": {"type": "string", "description": "JSON-encoded provider options object."},
+          "speaker_reference": {"type": "string", "format": "binary", "description": "Combined speaker identity and emotion/style reference audio."},
+          "speaker_reference_text": {"type": "string", "description": "Exact transcript of speaker_reference; required by OmniVoice."}
         }
       },
       "ProviderOptions": {

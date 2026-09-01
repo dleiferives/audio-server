@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 
@@ -222,17 +223,81 @@ func TestSynthesizeRejectsNonWAVFormatWithoutEncoder(t *testing.T) {
 }
 
 type fakeEncoder struct {
-	audio       []byte
-	contentType string
-	err         error
-	gotWAV      []byte
-	gotFormat   string
+	audio               []byte
+	contentType         string
+	err                 error
+	gotWAV              []byte
+	gotFormat           string
+	normalizedReference []byte
+	normalizeErr        error
+	gotReference        []byte
 }
 
 func (f *fakeEncoder) Encode(_ context.Context, wav []byte, format string) ([]byte, string, error) {
 	f.gotWAV = wav
 	f.gotFormat = format
 	return f.audio, f.contentType, f.err
+}
+
+func (f *fakeEncoder) NormalizeReferenceAudio(_ context.Context, audio []byte) ([]byte, error) {
+	f.gotReference = append([]byte(nil), audio...)
+	if f.normalizeErr != nil {
+		return nil, f.normalizeErr
+	}
+	if f.normalizedReference != nil {
+		return f.normalizedReference, nil
+	}
+	return audio, nil
+}
+
+func TestSynthesizeUploadsCombinedSpeakerEmotionReference(t *testing.T) {
+	enc := &fakeEncoder{normalizedReference: []byte("normalized-wav")}
+	var referencePath string
+	p := New("http://sidecar", fakeClient{do: func(req *http.Request) (*http.Response, error) {
+		var body speechRequest
+		encoded, _ := io.ReadAll(req.Body)
+		if err := json.Unmarshal(encoded, &body); err != nil {
+			t.Fatal(err)
+		}
+		referencePath, _ = body.Options["voice_ref"].(string)
+		if referencePath == "" || body.Options["reference_text"] != "emotionally spoken reference" {
+			t.Fatalf("sidecar options = %+v", body.Options)
+		}
+		got, err := os.ReadFile(referencePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != "normalized-wav" {
+			t.Fatalf("temporary reference = %q", got)
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("RIFF..."))}, nil
+	}}, enc)
+
+	_, err := p.Synthesize(context.Background(), provider.SpeechRequest{
+		Input: "translated line", SpeakerReference: []byte("compressed-input"),
+		SpeakerReferenceFilename: "reference.m4a", SpeakerReferenceText: "emotionally spoken reference",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(enc.gotReference) != "compressed-input" {
+		t.Fatalf("normalizer input = %q", enc.gotReference)
+	}
+	if _, err := os.Stat(referencePath); !os.IsNotExist(err) {
+		t.Fatalf("temporary reference was not removed: %v", err)
+	}
+}
+
+func TestSynthesizeReferenceRequiresTranscript(t *testing.T) {
+	enc := &fakeEncoder{}
+	p := New("http://sidecar", fakeClient{do: func(*http.Request) (*http.Response, error) {
+		t.Fatal("sidecar should not be called")
+		return nil, nil
+	}}, enc)
+	_, err := p.Synthesize(context.Background(), provider.SpeechRequest{Input: "line", SpeakerReference: []byte("audio")})
+	if !errors.Is(err, provider.ErrInvalidRequest) {
+		t.Fatalf("expected ErrInvalidRequest, got %v", err)
+	}
 }
 
 func TestSynthesizeEncodesNonWAVFormatViaEncoder(t *testing.T) {

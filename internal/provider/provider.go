@@ -22,6 +22,11 @@ type SpeechRequest struct {
 	Speed           float64         `json:"speed"`
 	ProviderOptions json.RawMessage `json:"provider_options,omitempty"`
 	Stream          bool            `json:"stream,omitempty"`
+	// SpeakerReference is an uploaded per-request reference clip. It is kept
+	// out of JSON because uploads arrive through multipart/form-data.
+	SpeakerReference         []byte `json:"-"`
+	SpeakerReferenceFilename string `json:"-"`
+	SpeakerReferenceText     string `json:"-"`
 }
 
 type SpeechResult struct {
@@ -61,6 +66,19 @@ type LanguageCatalog interface {
 // language handling; it is distinct from selecting a concrete BCP-47 tag.
 type AutoLanguageProvider interface {
 	SupportsAutoLanguage() bool
+}
+
+// ReferenceAudioProvider advertises how a provider can condition synthesis
+// on uploaded reference audio. Combined means the speaker clip also supplies
+// its speaking style/emotion. SeparateEmotion is reserved for providers that
+// accept a second, independent emotion reference.
+type ReferenceAudioProvider interface {
+	ReferenceAudioCapabilities() ReferenceAudioCapabilities
+}
+
+type ReferenceAudioCapabilities struct {
+	CombinedSpeakerEmotion bool
+	SeparateEmotion        bool
 }
 
 // Lifecycle is an optional interface for providers that manage an expensive

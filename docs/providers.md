@@ -136,6 +136,21 @@ server can report and validate that catalog while the sidecar is cold.
 
 Unknown fields or out-of-range values return `400` with `invalid audio request` (`provider.ErrInvalidRequest`) — validated in `internal/provider/omnivoice`, not the core server.
 
+### Per-request speaker and emotion reference
+
+`POST /v1/audio/speech` and `POST /v1/audio/jobs` accept a multipart
+`speaker_reference` file plus its required `speaker_reference_text`. For
+OmniVoice this is a combined reference: the same clip conditions both speaker
+identity and speaking style/emotion. FFmpeg accepts and normalizes common
+compressed containers before the native runtime reads the reference. The
+temporary normalized WAV is removed after the provider finishes, and no
+reusable voice profile is created.
+
+The capabilities endpoint advertises `"reference_modes":["combined"]` for
+OmniVoice. Separate speaker and emotion references are intentionally not
+emulated; an `emotion_reference` upload returns `400` until a provider with
+native separation is integrated.
+
 See [`tts/omnivoice/README.md`](../tts/omnivoice/README.md) for the standalone CLI script (`greek_tts.py`), which the sidecar's model-loading logic is based on.
 
 ## kokoro

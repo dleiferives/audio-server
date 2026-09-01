@@ -143,6 +143,48 @@ func TestSpeechInvalidProviderOptionsReturns400(t *testing.T) {
 	}
 }
 
+func TestSpeechAcceptsMultipartSpeakerReference(t *testing.T) {
+	var got provider.SpeechRequest
+	p := fakeReferenceProvider{fakeProvider: fakeProvider{
+		id: "clone", result: provider.SpeechResult{Audio: []byte("wav"), ContentType: "audio/wav", ProviderID: "clone", Model: "clone", Voice: "auto", Format: "wav"},
+		voices:         []provider.Voice{{Provider: "clone", Voice: "auto", Language: "el", Name: "Clone"}},
+		synthesizeHook: func(req provider.SpeechRequest) { got = req },
+	}}
+	s := newTestServerWithProvider(t, p, "clone", Config{})
+
+	resp := multipartSpeechRequest(t, s, map[string]string{
+		"model": "clone", "input": "translated line", "language": "el",
+		"response_format": "wav", "speaker_reference_text": "original line",
+		"provider_options": `{"steps":8}`,
+	}, "speaker.wav", []byte("reference-audio"), "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+	if string(got.SpeakerReference) != "reference-audio" || got.SpeakerReferenceFilename != "speaker.wav" || got.SpeakerReferenceText != "original line" {
+		t.Fatalf("reference request = %+v", got)
+	}
+	if string(got.ProviderOptions) != `{"steps":8}` {
+		t.Fatalf("provider options = %s", got.ProviderOptions)
+	}
+}
+
+func TestSpeechRejectsSeparateEmotionReferenceForNow(t *testing.T) {
+	s := newTestServer(t, fakeProvider{}, Config{})
+	resp := multipartSpeechRequest(t, s, map[string]string{
+		"input": "line", "speaker_reference_text": "reference",
+	}, "speaker.wav", []byte("speaker"), "emotion.wav")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "separate emotion_reference uploads are not supported yet") {
+		t.Fatalf("unexpected body: %s", body)
+	}
+}
+
 func TestSpeechInputLengthLimit(t *testing.T) {
 	s := newTestServer(t, fakeProvider{}, Config{MaxInputChars: 3})
 	resp := request(t, s, http.MethodPost, "/v1/audio/speech", `{"input":"four"}`, "")
@@ -851,6 +893,14 @@ type fakeManagedStreamer struct {
 	fakeStreamer
 }
 
+type fakeReferenceProvider struct {
+	fakeProvider
+}
+
+func (fakeReferenceProvider) ReferenceAudioCapabilities() provider.ReferenceAudioCapabilities {
+	return provider.ReferenceAudioCapabilities{CombinedSpeakerEmotion: true}
+}
+
 func (fakeManagedProvider) Warm(context.Context) error { return nil }
 func (fakeManagedProvider) Idle(context.Context) error { return nil }
 func (fakeManagedStreamer) Warm(context.Context) error { return nil }
@@ -976,6 +1026,41 @@ func multipartAudioRequest(t *testing.T, s *Server, fields map[string]string, au
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", &body)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	return rr.Result()
+}
+
+func multipartSpeechRequest(t *testing.T, s *Server, fields map[string]string, filename string, reference []byte, emotionFilename string) *http.Response {
+	t.Helper()
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	for key, value := range fields {
+		if err := w.WriteField(key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	file, err := w.CreateFormFile("speaker_reference", filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(reference); err != nil {
+		t.Fatal(err)
+	}
+	if emotionFilename != "" {
+		emotion, err := w.CreateFormFile("emotion_reference", emotionFilename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := emotion.Write([]byte("emotion")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/audio/speech", &body)
 	req.Header.Set("Content-Type", w.FormDataContentType())
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)

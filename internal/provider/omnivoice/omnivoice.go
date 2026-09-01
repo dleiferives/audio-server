@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/dleiferives/audio-server/internal/provider"
@@ -30,11 +31,16 @@ type Encoder interface {
 	Encode(ctx context.Context, wav []byte, format string) ([]byte, string, error)
 }
 
+type ReferenceNormalizer interface {
+	NormalizeReferenceAudio(ctx context.Context, audio []byte) ([]byte, error)
+}
+
 type Provider struct {
-	BaseURL   string
-	Client    HTTPClient
-	Encoder   Encoder
-	StartFunc func() error
+	BaseURL             string
+	Client              HTTPClient
+	Encoder             Encoder
+	ReferenceNormalizer ReferenceNormalizer
+	StartFunc           func() error
 }
 
 var (
@@ -48,7 +54,8 @@ func New(baseURL string, client HTTPClient, enc Encoder) Provider {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return Provider{BaseURL: baseURL, Client: client, Encoder: enc}
+	normalizer, _ := enc.(ReferenceNormalizer)
+	return Provider{BaseURL: baseURL, Client: client, Encoder: enc, ReferenceNormalizer: normalizer}
 }
 
 func (p Provider) ID() string {
@@ -56,6 +63,10 @@ func (p Provider) ID() string {
 }
 
 func (p Provider) SupportsAutoLanguage() bool { return true }
+
+func (p Provider) ReferenceAudioCapabilities() provider.ReferenceAudioCapabilities {
+	return provider.ReferenceAudioCapabilities{CombinedSpeakerEmotion: true}
+}
 
 func (p Provider) Health(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.BaseURL+"/health", nil)
@@ -200,6 +211,44 @@ func sidecarOptions(opts Options) map[string]any {
 	return options
 }
 
+func (p Provider) prepareUploadedReference(ctx context.Context, req provider.SpeechRequest, opts Options) (Options, func(), error) {
+	if len(req.SpeakerReference) == 0 {
+		return opts, func() {}, nil
+	}
+	if p.ReferenceNormalizer == nil {
+		return Options{}, nil, fmt.Errorf("%w: speaker reference normalization is not configured", provider.ErrUnavailable)
+	}
+	referenceText := strings.TrimSpace(req.SpeakerReferenceText)
+	if referenceText == "" {
+		referenceText = strings.TrimSpace(opts.ReferenceText)
+	}
+	if referenceText == "" {
+		return Options{}, nil, fmt.Errorf("%w: speaker_reference_text is required with speaker_reference", provider.ErrInvalidRequest)
+	}
+	wav, err := p.ReferenceNormalizer.NormalizeReferenceAudio(ctx, req.SpeakerReference)
+	if err != nil {
+		return Options{}, nil, err
+	}
+	file, err := os.CreateTemp("", "audio-server-omnivoice-reference-*.wav")
+	if err != nil {
+		return Options{}, nil, fmt.Errorf("%w: create speaker reference: %v", provider.ErrUnavailable, err)
+	}
+	name := file.Name()
+	cleanup := func() { _ = os.Remove(name) }
+	if _, err := file.Write(wav); err != nil {
+		file.Close()
+		cleanup()
+		return Options{}, nil, fmt.Errorf("%w: write speaker reference: %v", provider.ErrUnavailable, err)
+	}
+	if err := file.Close(); err != nil {
+		cleanup()
+		return Options{}, nil, fmt.Errorf("%w: close speaker reference: %v", provider.ErrUnavailable, err)
+	}
+	opts.VoiceRef = name
+	opts.ReferenceText = referenceText
+	return opts, cleanup, nil
+}
+
 // speechRequest matches the OpenAI-compatible JSON body that audiocpp_server expects.
 type speechRequest struct {
 	Model          string         `json:"model"`
@@ -247,6 +296,11 @@ func (p Provider) Synthesize(ctx context.Context, req provider.SpeechRequest) (p
 	if err != nil {
 		return provider.SpeechResult{}, err
 	}
+	opts, cleanupReference, err := p.prepareUploadedReference(ctx, req, opts)
+	if err != nil {
+		return provider.SpeechResult{}, err
+	}
+	defer cleanupReference()
 
 	options := sidecarOptions(opts)
 
@@ -366,6 +420,11 @@ func (p Provider) SynthesizeStream(ctx context.Context, req provider.SpeechReque
 	if err != nil {
 		return err
 	}
+	opts, cleanupReference, err := p.prepareUploadedReference(ctx, req, opts)
+	if err != nil {
+		return err
+	}
+	defer cleanupReference()
 
 	options := sidecarOptions(opts)
 	options["text_chunk_size"] = 200
