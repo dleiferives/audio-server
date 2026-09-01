@@ -142,6 +142,8 @@ curl -sS http://127.0.0.1:8010/healthz
 | `AUDIO_DEFAULT_STT_PROVIDER` | `cohere-transcribe` in `config.yml` | provider used for `auto`, `whisper-1`, and a blank transcription model |
 | `AUDIO_TRANSCRIBECPP_MODEL` | Cohere Q8 GGUF in `config.yml` | any transcribe.cpp-compatible GGUF model |
 | `AUDIO_TRANSCRIBECPP_BACKEND` | `cuda` in `config.yml` | transcribe.cpp backend (`auto`, `cuda`, or `cpu`) |
+| `AUDIO_VOXTRAL_REALTIME_MODEL` | Voxtral Realtime Q4 GGUF in `config.yml` | model used by the live WebSocket provider |
+| `AUDIO_VOXTRAL_REALTIME_BACKEND` | `cuda` in `config.yml` | Voxtral Realtime backend (`auto`, `cuda`, or `cpu`) |
 | `AUDIO_PARAKEET_ADDR` | `http://127.0.0.1:8026` in `config.yml` | Parakeet-TDT audio.cpp sidecar base URL |
 | `AUDIO_NEMOTRON_ADDR` | `http://127.0.0.1:8024` in `config.yml` | Nemotron audio.cpp sidecar base URL |
 | `AUDIO_KOKORO_ADDR` | _(empty)_ | Kokoro sidecar base URL, e.g. `http://127.0.0.1:8021`; provider disabled when blank |

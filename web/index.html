@@ -464,6 +464,7 @@ async function toggleRecord() {
     stopLiveMic();
     return;
   }
+  let openingSocket = null;
   try {
     const model = document.getElementById('stt-provider').value;
     const modelInfo = sttProviderCapabilities.find(info => info.provider === model);
@@ -481,6 +482,7 @@ async function toggleRecord() {
     if (postProcessModel) params.set('post_process_model', postProcessModel);
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const socket = new WebSocket(`${protocol}//${location.host}${API}/v1/audio/transcriptions/stream?${params}`);
+    openingSocket = socket;
     socket.binaryType = 'arraybuffer';
     await new Promise((resolve, reject) => {
       socket.onopen = resolve;
@@ -496,7 +498,7 @@ async function toggleRecord() {
         autoGainControl: true,
       },
     });
-    const context = new AudioContext();
+    const context = new AudioContext({ sampleRate: LIVE_TRANSCRIPTION_SAMPLE_RATE });
     await context.resume();
     const source = context.createMediaStreamSource(stream);
     const gain = context.createGain();
@@ -513,6 +515,7 @@ async function toggleRecord() {
       recording: true,
     };
     liveMicSession = session;
+    openingSocket = null;
     socket.onmessage = event => {
       const message = JSON.parse(event.data);
       if (message.type === 'transcript.text.partial' || message.type === 'transcript.text.done') {
@@ -559,12 +562,13 @@ async function toggleRecord() {
     btn.disabled = false;
     sttStatusEl.textContent = 'Listening… live transcription active';
   } catch (e) {
+    if (openingSocket && openingSocket.readyState < WebSocket.CLOSING) openingSocket.close();
     if (liveMicSession) cleanupLiveMic(liveMicSession);
     liveMicSession = null;
     btn.disabled = false;
     btn.classList.remove('recording');
     btn.textContent = '🎤 Start live mic';
-    sttStatusEl.textContent = `Microphone unavailable: ${e.message}`;
+    sttStatusEl.textContent = `Live transcription unavailable: ${e.message}`;
   }
 }
 
