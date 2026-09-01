@@ -57,6 +57,20 @@ Only `espeak-ng` implements `provider.Streamer` today (see `docs/providers.md`);
 
 `POST /v1/audio/transcriptions` doesn't use the TTS job queue or `provider.Provider`. STT uses its own `sttprovider.Provider` interface, plus the optional `StreamingProvider` interface for cumulative partial results. Normal requests call `Transcribe`; `stream=true` relays provider partials as SSE. Both paths use the shared GPU execution/residency manager. Faster-whisper is registered as an arbitrary Python command while the native providers use audio.cpp configuration files.
 
+## Autodubbing analysis jobs
+
+`internal/analysisjob` orchestrates a multi-stage asynchronous job:
+optional BS-RoFormer dialogue isolation, Sortformer diarization, buffered STT
+per timeline segment, and CPU WeSpeaker embedding. GPU stages use the same
+`lifecycle.Manager` execution gate and VRAM-budgeted LRU residency as TTS and
+STT. Releasing the lease between stages lets other queued audio work proceed
+and allows eviction on small GPUs.
+
+The API exposes separate status and result routes under
+`/v1/audio/analysis-jobs`. Media decoding and normalization run inside the
+background job, so the endpoint returns as soon as the upload is accepted;
+subsequent stages operate on deterministic PCM input.
+
 ## Testability
 
 `internal/run` defines a `Command` function type that wraps `os/exec`. Tests replace it with a stub, so provider tests never spawn real processes.

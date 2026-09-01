@@ -377,6 +377,30 @@ and `duration`, along with `model` and the original `source_model`. These jobs
 exist only when the WebSocket request explicitly supplied
 `post_process_model`.
 
+### `POST /v1/audio/analysis-jobs`
+
+Queues an autodubbing analysis and returns `202` with `id`, `status_url`, and
+`result_url`. This is multipart: `file` is required; optional fields are
+`transcribe` (default true), `transcription_model`, `language`,
+`include_speaker_embeddings` (default true), and `separate_dialogue` (default
+false). Audio and video formats supported by FFmpeg are normalized
+automatically.
+
+The stages use the shared GPU lifecycle/VRAM budget. Dialogue separation,
+diarization, and STT release the GPU execution lease between stages; WeSpeaker
+embedding runs on CPU.
+
+### `GET /v1/audio/analysis-jobs/{id}`
+
+Returns `queued`, `running`, `succeeded`, or `failed` plus timestamps and the
+result URL. Analysis is asynchronous and does not hold the upload connection.
+
+### `GET /v1/audio/analysis-jobs/{id}/result`
+
+Returns `202` until ready, then speaker-attributed timeline segments, raw
+diarization turns, optional captions, and optional speaker embeddings. See
+[Autodubbing analysis](autodubbing.md) for a complete example and limitations.
+
 ## Authentication
 
 When `AUDIO_API_KEY` is set, all `/v1/` endpoints require one of:

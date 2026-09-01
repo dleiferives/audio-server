@@ -10,6 +10,22 @@ if [[ "$(uname -s)" != "Linux" ]]; then
   exit 1
 fi
 
+if ! command -v go >/dev/null 2>&1; then
+  echo "==> Go is missing; running the local Go/runtime setup first"
+  "${SCRIPT_DIR}/setup-local.sh"
+fi
+
+if ! command -v nvcc >/dev/null 2>&1; then
+  cat >&2 <<'EOF'
+CUDA's nvcc compiler is required but was not found.
+Install the CUDA Toolkit for your distribution from:
+  https://developer.nvidia.com/cuda-downloads
+Then rerun this script. The NVIDIA display driver alone does not include nvcc.
+EOF
+  exit 1
+fi
+CUDA_ROOT="$(dirname -- "$(dirname -- "$(readlink -f -- "$(command -v nvcc)")")")"
+
 echo "==> Installing native build and media tools"
 sudo apt-get update
 sudo apt-get install -y \
@@ -19,10 +35,10 @@ echo "==> Initializing native model runtimes"
 git -C "${PROJECT_DIR}" submodule update --init audio.cpp transcribe.cpp wespeaker
 
 echo "==> Building the full CUDA audio.cpp runtime"
-make -C "${PROJECT_DIR}" build-audiocpp
+make -C "${PROJECT_DIR}" CUDA_HOME="${CUDA_ROOT}" build-audiocpp
 
 echo "==> Building transcribe.cpp and the WeSpeaker ONNX service"
-make -C "${PROJECT_DIR}" build-transcribecpp build-wespeaker
+make -C "${PROJECT_DIR}" CUDA_HOME="${CUDA_ROOT}" build-transcribecpp build-wespeaker
 
 echo "==> Downloading pinned analysis and transcription models"
 make -C "${PROJECT_DIR}" \

@@ -14,6 +14,9 @@ A standalone audio manager service for TTS and STT. Exposes OpenAI-compatible sp
 | `parakeet` | audio.cpp sidecar (STT, native CUDA/CPU) | shipped |
 | `nemotron` | audio.cpp sidecar (streaming-capable STT, native CUDA/CPU) | shipped |
 | `faster-whisper` | HTTP sidecar (STT, Python / GPU or CPU) | shipped, requires `AUDIO_FASTERWHISPER_ADDR` |
+| `sortformer` | audio.cpp sidecar (speaker diarization, native CUDA/CPU) | shipped |
+| `wespeaker` | official C++ ONNX runtime (speaker embeddings, CPU) | shipped |
+| `bs-roformer` | audio.cpp sidecar (dialogue/background separation, native CUDA/CPU) | shipped |
 
 ## Install runtime tools
 
@@ -44,6 +47,9 @@ go build -o bin/audio-server ./cmd/audio
 make build-transcribecpp
 make download-cohere
 make download-voxtral
+
+# Complete native autodubbing analysis stack
+./tmp/scripts/setup-autodubbing.sh
 ```
 
 ## Generate speech
@@ -104,6 +110,19 @@ OmniVoice voice cloning accepts a per-request multipart
 used as a combined speaker-and-emotion reference, normalized automatically,
 and deleted after synthesis; see [the speech API](docs/api.md#post-v1audiospeech).
 
+## Analyze a show for autodubbing
+
+Upload audio or video to the asynchronous analysis API:
+
+```bash
+curl -sS http://127.0.0.1:8010/v1/audio/analysis-jobs \
+  -F file=@episode.mkv -F language=en -F separate_dialogue=true
+```
+
+It produces speaker-attributed caption segments and optional WeSpeaker
+embeddings. See [the autodubbing guide](docs/autodubbing.md) for polling,
+speaker matching, model behavior, and current limitations.
+
 ## List voices
 
 ```bash
@@ -159,6 +178,7 @@ curl -sS http://127.0.0.1:8010/healthz
 | `AUDIO_FASTERWHISPER_MODEL_SIZE` | `large-v3` in `config.yml` | model downloaded and loaded on the first faster-whisper request |
 | `AUDIO_FASTERWHISPER_DEVICE` | `cuda` in `config.yml` | inference device |
 | `AUDIO_FASTERWHISPER_COMPUTE_TYPE` | `int8` in `config.yml` | quantization required for the 4 GB GPU |
+| `AUDIO_ANALYSIS_MAX_UPLOAD_MIB` | `2048` | maximum audio/video analysis upload size |
 
 All flags are also available as CLI flags — run `./bin/audio-server -help` for the full list.
 

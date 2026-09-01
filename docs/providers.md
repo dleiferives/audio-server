@@ -286,6 +286,29 @@ The sidecar itself returns a buffered transcription. The Go provider adapts
 that result to the streaming SSE contract, allowing the web UI's cumulative
 three-second microphone snapshots to update normally.
 
+## Autodubbing analysis providers
+
+### Sortformer
+
+Sortformer runs through the pinned audio.cpp server using
+`audiocpp-configs/sortformer.json`. It returns sample-accurate speaker turns,
+including overlaps, and participates in shared CUDA lifecycle and LRU
+eviction. The configured model supports at most four local speakers.
+
+### WeSpeaker
+
+The `wespeaker` submodule is the official native C++ ONNX Runtime. The
+`speaker/wespeaker` sidecar keeps Gemini DF-ResNet114-LM resident on CPU and
+returns L2-normalized 256-dimensional embeddings. It uses no configured VRAM,
+so it can remain available while TTS/STT occupy the GPU.
+
+### BS-RoFormer
+
+BS-RoFormer runs through audio.cpp using
+`audiocpp-configs/bs-roformer.json`. It is opt-in per analysis request and
+isolates a vocals/dialogue stem before diarization. It does not separate one
+overlapping actor from another.
+
 ## Adding a provider
 
 1. Create a package under `internal/provider/<name>/`

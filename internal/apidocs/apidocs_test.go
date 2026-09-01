@@ -25,6 +25,8 @@ func TestOpenAPIContract(t *testing.T) {
 		"/v1/audio/jobs/{id}", "/v1/audio/jobs/{id}/audio",
 		"/v1/audio/jobs/{id}/stream", "/v1/audio/transcriptions",
 		"/v1/audio/transcriptions/stream", "/v1/audio/transcription-jobs/{id}",
+		"/v1/audio/analysis-jobs", "/v1/audio/analysis-jobs/{id}",
+		"/v1/audio/analysis-jobs/{id}/result",
 		"/v1/audio/alignments", "/v1/audio/alignments/models",
 		"/v1/audio/alignments/{id}", "/v1/audio/alignments/{id}/result",
 	}

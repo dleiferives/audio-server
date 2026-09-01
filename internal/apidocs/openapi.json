@@ -12,6 +12,7 @@
     {"name": "System", "description": "Health, documentation, and runtime discovery."},
     {"name": "Speech", "description": "Synchronous, streaming, and asynchronous text-to-speech."},
     {"name": "Transcription", "description": "Buffered uploads, true duplex WebSocket streaming, and optional asynchronous final refinement."},
+    {"name": "Analysis", "description": "Asynchronous dialogue separation, diarization, transcription, and speaker embeddings for dubbing workflows."},
     {"name": "Alignment", "description": "Asynchronous Montreal Forced Aligner workflows. Routes exist only when alignment is enabled."}
   ],
   "security": [{"bearerAuth": []}, {"apiKey": []}],
@@ -120,6 +121,29 @@
         "responses": {"200": {"description": "Current refinement state and final transcript when complete", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TranscriptionJob"}}}}, "401": {"$ref": "#/components/responses/Unauthorized"}, "404": {"$ref": "#/components/responses/NotFound"}}
       }
     },
+    "/v1/audio/analysis-jobs": {
+      "post": {
+        "tags": ["Analysis"], "operationId": "createAnalysisJob", "summary": "Queue an audio or video analysis job",
+        "description": "Accepts any ffmpeg-decodable audio/video upload and returns immediately. The job can optionally isolate dialogue with BS-RoFormer, then runs Sortformer diarization, per-segment STT, and CPU WeSpeaker embeddings. GPU stages use the shared model lifecycle and VRAM budget. BS-RoFormer separates dialogue from background; it does not separate overlapping actors.",
+        "requestBody": {"required": true, "content": {"multipart/form-data": {"schema": {"$ref": "#/components/schemas/AnalysisRequest"}}}},
+        "responses": {"202": {"description": "Analysis accepted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AnalysisJobAccepted"}}}}, "400": {"$ref": "#/components/responses/BadRequest"}, "401": {"$ref": "#/components/responses/Unauthorized"}, "503": {"$ref": "#/components/responses/Unavailable"}}
+      }
+    },
+    "/v1/audio/analysis-jobs/{id}": {
+      "get": {
+        "tags": ["Analysis"], "operationId": "getAnalysisJob", "summary": "Poll an analysis job",
+        "parameters": [{"$ref": "#/components/parameters/JobId"}],
+        "responses": {"200": {"description": "Current analysis state", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AnalysisJob"}}}}, "401": {"$ref": "#/components/responses/Unauthorized"}, "404": {"$ref": "#/components/responses/NotFound"}}
+      }
+    },
+    "/v1/audio/analysis-jobs/{id}/result": {
+      "get": {
+        "tags": ["Analysis"], "operationId": "getAnalysisResult", "summary": "Fetch completed diarization and caption data",
+        "description": "Returns 202 while queued/running, 200 when complete, and 422 if analysis failed. Speaker IDs are local to this asset. Embeddings are sensitive biometric vectors; store and transmit them accordingly.",
+        "parameters": [{"$ref": "#/components/parameters/JobId"}],
+        "responses": {"200": {"description": "Completed analysis", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AnalysisResult"}}}}, "202": {"description": "Analysis is not complete", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AnalysisJob"}}}}, "401": {"$ref": "#/components/responses/Unauthorized"}, "404": {"$ref": "#/components/responses/NotFound"}, "422": {"description": "Analysis failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}}
+      }
+    },
     "/v1/audio/alignments": {
       "post": {
         "tags": ["Alignment"], "operationId": "createAlignment", "summary": "Queue forced alignment",
@@ -161,7 +185,8 @@
       "Voice": {"type": "object", "required": ["provider", "voice", "language", "name"], "properties": {"provider": {"type": "string"}, "voice": {"type": "string"}, "language": {"type": "string"}, "name": {"type": "string"}, "gender": {"type": "string"}}},
       "ProviderCapabilities": {"type": "object", "required": ["provider", "languages", "voices"], "properties": {"provider": {"type": "string"}, "languages": {"type": "array", "items": {"type": "string"}}, "voices": {"type": "array", "items": {"$ref": "#/components/schemas/Voice"}}, "reference_modes": {"type": "array", "items": {"type": "string", "enum": ["combined", "separate"]}, "description": "Reference-audio modes natively supported by this provider."}}},
       "SttProviderCapabilities": {"type": "object", "required": ["provider", "live_streaming"], "properties": {"provider": {"type": "string"}, "live_streaming": {"type": "boolean"}}},
-      "CapabilitiesResponse": {"type": "object", "required": ["languages", "providers", "stt_providers"], "properties": {"languages": {"type": "array", "items": {"type": "string"}}, "providers": {"type": "array", "items": {"$ref": "#/components/schemas/ProviderCapabilities"}}, "stt_providers": {"type": "array", "items": {"$ref": "#/components/schemas/SttProviderCapabilities"}}}},
+      "AnalysisProviderCapabilities": {"type": "object", "required": ["provider", "tasks", "streaming"], "properties": {"provider": {"type": "string"}, "tasks": {"type": "array", "items": {"type": "string", "enum": ["diarization", "overlap_detection", "speaker_embedding", "speaker_verification", "dialogue_separation", "music_separation"]}}, "streaming": {"type": "boolean"}, "max_speakers": {"type": "integer"}}},
+      "CapabilitiesResponse": {"type": "object", "required": ["languages", "providers", "stt_providers", "analysis_providers"], "properties": {"languages": {"type": "array", "items": {"type": "string"}}, "providers": {"type": "array", "items": {"$ref": "#/components/schemas/ProviderCapabilities"}}, "stt_providers": {"type": "array", "items": {"$ref": "#/components/schemas/SttProviderCapabilities"}}, "analysis_providers": {"type": "array", "items": {"$ref": "#/components/schemas/AnalysisProviderCapabilities"}}}},
       "SpeechRequest": {
         "type": "object", "required": ["input"], "additionalProperties": false,
         "properties": {
@@ -233,6 +258,12 @@
         ]
       },
       "TranscriptionJob": {"type": "object", "required": ["id", "status", "model", "source_model", "created_at"], "properties": {"id": {"type": "string"}, "status": {"type": "string", "enum": ["queued", "running", "succeeded", "failed"]}, "model": {"type": "string"}, "source_model": {"type": "string"}, "created_at": {"type": "string", "format": "date-time"}, "started_at": {"type": "string", "format": "date-time"}, "finished_at": {"type": "string", "format": "date-time"}, "text": {"type": "string"}, "language": {"type": "string"}, "duration": {"type": "number"}, "error": {"type": "string"}}},
+      "AnalysisRequest": {"type": "object", "required": ["file"], "properties": {"file": {"type": "string", "format": "binary", "description": "Any ffmpeg-decodable audio or video file."}, "include_speaker_embeddings": {"type": "boolean", "default": true}, "transcribe": {"type": "boolean", "default": true}, "transcription_model": {"type": "string", "default": "auto", "description": "Configured buffered STT provider; auto uses the default."}, "language": {"type": "string", "description": "Optional transcription language hint."}, "separate_dialogue": {"type": "boolean", "default": false, "description": "Run BS-RoFormer dialogue/background separation before analysis."}}},
+      "AnalysisJobAccepted": {"type": "object", "required": ["id", "status", "status_url", "result_url"], "properties": {"id": {"type": "string"}, "status": {"const": "queued"}, "status_url": {"type": "string"}, "result_url": {"type": "string"}}},
+      "AnalysisJob": {"type": "object", "required": ["id", "status", "created_at", "result_url"], "properties": {"id": {"type": "string"}, "status": {"type": "string", "enum": ["queued", "running", "succeeded", "failed"]}, "created_at": {"type": "string", "format": "date-time"}, "started_at": {"type": "string", "format": "date-time"}, "finished_at": {"type": "string", "format": "date-time"}, "result_url": {"type": "string"}, "error": {"$ref": "#/components/schemas/Error"}}},
+      "AnalysisSegment": {"type": "object", "required": ["start_ms", "end_ms", "speaker_ids", "confidence", "overlap"], "properties": {"start_ms": {"type": "integer"}, "end_ms": {"type": "integer"}, "speaker_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}}, "confidence": {"type": "number"}, "overlap": {"type": "boolean"}, "text": {"type": "string"}}},
+      "AnalysisSpeaker": {"type": "object", "required": ["id", "speech_ms"], "properties": {"id": {"type": "string"}, "speech_ms": {"type": "integer"}, "embedding_model": {"type": "string"}, "embedding": {"type": "array", "items": {"type": "number", "format": "float"}, "description": "L2-normalized WeSpeaker vector for cosine matching."}}},
+      "AnalysisResult": {"type": "object", "required": ["duration_ms", "sample_rate", "diarization_model", "speakers", "segments", "raw_turns"], "properties": {"duration_ms": {"type": "integer"}, "sample_rate": {"type": "integer"}, "diarization_model": {"type": "string"}, "speaker_embedding_model": {"type": "string"}, "transcription_model": {"type": "string"}, "dialogue_separation_model": {"type": "string"}, "speakers": {"type": "array", "items": {"$ref": "#/components/schemas/AnalysisSpeaker"}}, "segments": {"type": "array", "items": {"$ref": "#/components/schemas/AnalysisSegment"}}, "raw_turns": {"type": "array", "items": {"type": "object", "additionalProperties": true}}}},
       "AlignmentRequest": {"type": "object", "required": ["file", "transcript", "language"], "properties": {"file": {"type": "string", "format": "binary"}, "transcript": {"type": "string"}, "language": {"type": "string", "description": "A code returned by /v1/audio/alignments/models."}}}
     }
   }
