@@ -210,6 +210,17 @@ is downloaded with `make download-cohere` and built with
 It participates in the shared VRAM budget and LRU eviction policy. Uploads are
 normalized by the main server to mono 16 kHz PCM WAV before dispatch.
 
+`cohere-transcribe` is deliberately buffered-only. `voxtral-realtime` uses the
+same sidecar binary with transcribe.cpp's incremental stream API and is the
+only checked-in provider advertised as `live_streaming`. The WebSocket holds
+the GPU execution lease for the session and sends partial hypotheses after
+each model update.
+
+An optional `post_process_model` on the WebSocket creates an asynchronous
+second-pass transcription job after commit. This is opt-in: Cohere is never
+run automatically. The linked result is polled through
+`GET /v1/audio/transcription-jobs/{id}`.
+
 ### Parakeet-TDT
 
 **ID:** `parakeet`
@@ -224,11 +235,9 @@ Q8_0 matrix weights and buffered streaming with 2-second center and right-
 context windows. `stream=true` exposes its cumulative partial transcripts as
 SSE.
 
-The browser's live microphone mode captures PCM continuously and submits a
-rolling cumulative WAV snapshot every three seconds. Each snapshot uses the
-native Parakeet streaming session and its partial events. This rolling approach
-is necessary because `audiocpp_server` currently buffers an HTTP upload before
-starting inference; it does not yet accept an indefinitely open audio body.
+Parakeet's multipart SSE mode remains useful for uploaded recordings, but it
+is not advertised as a true live input model. The browser live microphone now
+uses Voxtral Realtime over the duplex WebSocket endpoint.
 
 Use `AUDIO_DEFAULT_STT_PROVIDER=nemotron` to make Nemotron the default without
 removing Parakeet, or send `model=nemotron` on an individual request.

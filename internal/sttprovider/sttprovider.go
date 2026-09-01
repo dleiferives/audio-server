@@ -70,6 +70,38 @@ type StreamingProvider interface {
 	TranscribeStream(ctx context.Context, req TranscriptionRequest, onPartial func(TranscriptionResult) error) (TranscriptionResult, error)
 }
 
+// LiveStreamRequest configures a duplex transcription session. Audio frames
+// are signed 16-bit little-endian PCM at the declared rate and channel count.
+type LiveStreamRequest struct {
+	Language   string
+	SampleRate int
+	Channels   int
+}
+
+type LiveStreamUpdate struct {
+	Text          string
+	CommittedText string
+	TentativeText string
+	InputMS       int64
+	BufferedMS    int64
+	Revision      int
+	Changed       bool
+	Final         bool
+}
+
+type LiveStream interface {
+	Feed(ctx context.Context, pcm []byte) (LiveStreamUpdate, error)
+	Finalize(ctx context.Context) (LiveStreamUpdate, error)
+	Close() error
+}
+
+// LiveStreamingProvider is implemented by providers that consume audio
+// incrementally rather than repeatedly decoding a growing recording.
+type LiveStreamingProvider interface {
+	SupportsLiveStreaming() bool
+	OpenLiveStream(ctx context.Context, req LiveStreamRequest) (LiveStream, error)
+}
+
 // OnDemandProvider is implemented by providers whose sidecar is intentionally
 // stopped while idle and started by Transcribe. Health checks report an
 // unreachable on-demand provider as cold rather than making the whole service

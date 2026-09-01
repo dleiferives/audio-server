@@ -4,21 +4,26 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
+	"github.com/gorilla/websocket"
+
 	"github.com/dleiferives/audio-server/internal/apidocs"
 	"github.com/dleiferives/audio-server/internal/provider"
 	"github.com/dleiferives/audio-server/internal/queue"
 	"github.com/dleiferives/audio-server/internal/store"
+	"github.com/dleiferives/audio-server/internal/sttjob"
 	"github.com/dleiferives/audio-server/internal/sttprovider"
 )
 
@@ -88,6 +93,7 @@ type Server struct {
 	maxUploadBytes     int
 	sttAudioNormalizer sttprovider.AudioNormalizer
 	sttRunGate         func(string) (func(), error)
+	sttJobs            *sttjob.Manager
 	webDir             string
 	audioStore         *store.Store
 	alignProvider      Aligner
@@ -167,9 +173,12 @@ func New(cfg Config) (*Server, error) {
 		maxUploadBytes:     cfg.MaxUploadBytes,
 		sttAudioNormalizer: cfg.SttAudioNormalizer,
 		sttRunGate:         cfg.SttRunGate,
-		webDir:             cfg.WebDir,
-		audioStore:         cfg.AudioStore,
-		alignProvider:      cfg.AlignProvider,
+		sttJobs: sttjob.New(sttjob.Config{
+			Providers: sttProviders, RunGate: cfg.SttRunGate, Timeout: cfg.RequestTimeout,
+		}),
+		webDir:        cfg.WebDir,
+		audioStore:    cfg.AudioStore,
+		alignProvider: cfg.AlignProvider,
 	}, nil
 }
 
@@ -187,6 +196,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/audio/jobs/{id}/audio", s.auth(s.getJobAudio))
 	mux.HandleFunc("GET /v1/audio/jobs/{id}/stream", s.auth(s.getJobStream))
 	mux.HandleFunc("POST /v1/audio/transcriptions", s.auth(s.transcriptions))
+	mux.HandleFunc("GET /v1/audio/transcriptions/stream", s.auth(s.liveTranscription))
+	mux.HandleFunc("GET /v1/audio/transcription-jobs/{id}", s.auth(s.getTranscriptionJob))
 	if s.alignProvider != nil {
 		mux.HandleFunc("POST /v1/audio/alignments", s.auth(s.createAlignJob))
 		mux.HandleFunc("GET /v1/audio/alignments/{id}", s.auth(s.getAlignJob))
@@ -198,6 +209,226 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("GET /", fs)
 	}
 	return mux
+}
+
+var liveSTTUpgrader = websocket.Upgrader{
+	ReadBufferSize:  32 << 10,
+	WriteBufferSize: 32 << 10,
+	CheckOrigin: func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true
+		}
+		parsed, err := url.Parse(origin)
+		return err == nil && strings.EqualFold(parsed.Host, r.Host)
+	},
+}
+
+func (s *Server) liveTranscription(w http.ResponseWriter, r *http.Request) {
+	model := strings.TrimSpace(r.URL.Query().Get("model"))
+	p, ok := s.sttProviderFor(model)
+	if !ok {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("unknown transcription model %q", model))
+		return
+	}
+	live, ok := p.(sttprovider.LiveStreamingProvider)
+	if !ok || !live.SupportsLiveStreaming() {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("transcription provider %q does not support live streaming", p.ID()))
+		return
+	}
+	postProcessModel := strings.TrimSpace(r.URL.Query().Get("post_process_model"))
+	if postProcessModel != "" {
+		if _, ok := s.sttProviders[postProcessModel]; !ok {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("unknown post-processing transcription model %q", postProcessModel))
+			return
+		}
+	}
+
+	var release func()
+	if s.sttRunGate != nil {
+		var err error
+		release, err = s.sttRunGate(p.ID())
+		if err != nil {
+			writeSttProviderError(w, fmt.Errorf("%w: execution resource unavailable: %v", sttprovider.ErrUnavailable, err))
+			return
+		}
+		if release != nil {
+			defer release()
+		}
+	}
+
+	stream, err := live.OpenLiveStream(r.Context(), sttprovider.LiveStreamRequest{
+		Language: r.URL.Query().Get("language"), SampleRate: 16000, Channels: 1,
+	})
+	if err != nil {
+		writeSttProviderError(w, err)
+		return
+	}
+	defer stream.Close()
+
+	conn, err := liveSTTUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	conn.SetReadLimit(1 << 20)
+	if err := conn.WriteJSON(map[string]any{
+		"type": "transcription_session.created",
+		"session": map[string]any{
+			"model": p.ID(), "format": "pcm_s16le", "sample_rate": 16000, "channels": 1,
+		},
+	}); err != nil {
+		return
+	}
+	var postProcessPCM []byte
+
+	for {
+		messageType, payload, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		switch messageType {
+		case websocket.BinaryMessage:
+			if postProcessModel != "" {
+				if len(postProcessPCM)+len(payload)+44 > s.maxUploadBytes {
+					writeLiveSTTError(conn, fmt.Errorf("post-processing audio exceeds the %d-byte limit", s.maxUploadBytes))
+					return
+				}
+				postProcessPCM = append(postProcessPCM, payload...)
+			}
+			update, err := stream.Feed(r.Context(), payload)
+			if err != nil {
+				writeLiveSTTError(conn, err)
+				return
+			}
+			if update.Changed {
+				if err := conn.WriteJSON(liveSTTEvent("transcript.text.partial", update)); err != nil {
+					return
+				}
+			}
+		case websocket.TextMessage:
+			var event struct {
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal(payload, &event); err != nil {
+				writeLiveSTTError(conn, fmt.Errorf("invalid control message: %w", err))
+				return
+			}
+			switch event.Type {
+			case "input_audio.commit":
+				update, err := stream.Finalize(r.Context())
+				if err != nil {
+					writeLiveSTTError(conn, err)
+					return
+				}
+				if err := conn.WriteJSON(liveSTTEvent("transcript.text.done", update)); err != nil {
+					return
+				}
+				if postProcessModel != "" {
+					wav, err := pcm16WAV(postProcessPCM, 16000, 1)
+					if err != nil {
+						writeLiveSTTError(conn, err)
+						return
+					}
+					job, err := s.sttJobs.Submit(postProcessModel, p.ID(), sttprovider.TranscriptionRequest{
+						Audio: wav, Filename: "live-stream.wav", Language: r.URL.Query().Get("language"), Model: postProcessModel,
+					})
+					if err != nil {
+						writeLiveSTTError(conn, err)
+						return
+					}
+					if err := conn.WriteJSON(map[string]any{
+						"type": "transcription.post_process.created",
+						"job": map[string]any{
+							"id": job.ID, "model": job.ProviderID,
+							"status": job.Status, "status_url": "/v1/audio/transcription-jobs/" + job.ID,
+						},
+					}); err != nil {
+						return
+					}
+				}
+				_ = conn.WriteJSON(map[string]string{"type": "transcription_session.done"})
+				_ = conn.WriteControl(websocket.CloseMessage,
+					websocket.FormatCloseMessage(websocket.CloseNormalClosure, "complete"), time.Now().Add(time.Second))
+				return
+			case "ping":
+				if err := conn.WriteJSON(map[string]string{"type": "pong"}); err != nil {
+					return
+				}
+			default:
+				writeLiveSTTError(conn, fmt.Errorf("unsupported control message %q", event.Type))
+				return
+			}
+		default:
+			writeLiveSTTError(conn, errors.New("only binary PCM and JSON control messages are accepted"))
+			return
+		}
+	}
+}
+
+func (s *Server) getTranscriptionJob(w http.ResponseWriter, r *http.Request) {
+	job, err := s.sttJobs.Get(r.PathValue("id"))
+	if errors.Is(err, sttjob.ErrNotFound) {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	body := map[string]any{
+		"id": job.ID, "status": job.Status, "model": job.ProviderID, "source_model": job.SourceModel,
+		"created_at": job.CreatedAt,
+	}
+	if !job.StartedAt.IsZero() {
+		body["started_at"] = job.StartedAt
+	}
+	if !job.FinishedAt.IsZero() {
+		body["finished_at"] = job.FinishedAt
+	}
+	if job.Status == sttjob.StatusSucceeded {
+		body["text"] = job.Result.Text
+		body["language"] = job.Result.Language
+		body["duration"] = job.Result.Duration
+	}
+	if job.Err != nil {
+		body["error"] = job.Err.Error()
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+func pcm16WAV(pcm []byte, sampleRate, channels int) ([]byte, error) {
+	if len(pcm) == 0 || len(pcm)%2 != 0 || sampleRate <= 0 || channels <= 0 {
+		return nil, errors.New("cannot create WAV from invalid PCM")
+	}
+	wav := make([]byte, 44+len(pcm))
+	copy(wav[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(wav[4:8], uint32(36+len(pcm)))
+	copy(wav[8:12], "WAVE")
+	copy(wav[12:16], "fmt ")
+	binary.LittleEndian.PutUint32(wav[16:20], 16)
+	binary.LittleEndian.PutUint16(wav[20:22], 1)
+	binary.LittleEndian.PutUint16(wav[22:24], uint16(channels))
+	binary.LittleEndian.PutUint32(wav[24:28], uint32(sampleRate))
+	binary.LittleEndian.PutUint32(wav[28:32], uint32(sampleRate*channels*2))
+	binary.LittleEndian.PutUint16(wav[32:34], uint16(channels*2))
+	binary.LittleEndian.PutUint16(wav[34:36], 16)
+	copy(wav[36:40], "data")
+	binary.LittleEndian.PutUint32(wav[40:44], uint32(len(pcm)))
+	copy(wav[44:], pcm)
+	return wav, nil
+}
+
+func liveSTTEvent(eventType string, update sttprovider.LiveStreamUpdate) map[string]any {
+	return map[string]any{
+		"type": eventType, "text": update.Text, "committed_text": update.CommittedText,
+		"tentative_text": update.TentativeText, "revision": update.Revision,
+		"input_ms": update.InputMS, "buffered_ms": update.BufferedMS,
+	}
+}
+
+func writeLiveSTTError(conn *websocket.Conn, err error) {
+	_ = conn.WriteJSON(map[string]any{"type": "error", "error": map[string]string{"message": err.Error()}})
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -308,9 +539,22 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 		languages = append(languages, language)
 	}
 	sort.Strings(languages)
+	sttIDs := make([]string, 0, len(s.sttProviders))
+	for id := range s.sttProviders {
+		sttIDs = append(sttIDs, id)
+	}
+	sort.Strings(sttIDs)
+	sttCapabilities := make([]map[string]any, 0, len(sttIDs))
+	for _, id := range sttIDs {
+		live, ok := s.sttProviders[id].(sttprovider.LiveStreamingProvider)
+		sttCapabilities = append(sttCapabilities, map[string]any{
+			"provider": id, "live_streaming": ok && live.SupportsLiveStreaming(),
+		})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"languages": languages,
-		"providers": providers,
+		"languages":     languages,
+		"providers":     providers,
+		"stt_providers": sttCapabilities,
 	})
 }
 

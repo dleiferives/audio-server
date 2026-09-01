@@ -84,6 +84,12 @@ type configFile struct {
 	TranscribecppModel        string         `yaml:"transcribecpp_model"`
 	TranscribecppBackend      string         `yaml:"transcribecpp_backend"`
 	TranscribecppThreads      int            `yaml:"transcribecpp_threads"`
+	VoxtralRealtimeEnabled    bool           `yaml:"voxtral_realtime_enabled"`
+	VoxtralRealtimeAddr       string         `yaml:"voxtral_realtime_addr"`
+	VoxtralRealtimePort       int            `yaml:"voxtral_realtime_port"`
+	VoxtralRealtimeModel      string         `yaml:"voxtral_realtime_model"`
+	VoxtralRealtimeBackend    string         `yaml:"voxtral_realtime_backend"`
+	VoxtralRealtimeThreads    int            `yaml:"voxtral_realtime_threads"`
 	AlignEnabled              bool           `yaml:"align_enabled"`
 	AlignMFAEnv               string         `yaml:"align_mfa_env"`
 	AlignMFAWorkDir           string         `yaml:"align_mfa_work_dir"`
@@ -147,6 +153,12 @@ func main() {
 	transcribecppModel := flag.String("transcribecpp-model", env("AUDIO_TRANSCRIBECPP_MODEL", cfg.TranscribecppModel), "path to any transcribe.cpp-compatible GGUF model")
 	transcribecppBackend := flag.String("transcribecpp-backend", env("AUDIO_TRANSCRIBECPP_BACKEND", valueOr(cfg.TranscribecppBackend, "cuda")), "transcribe.cpp backend: auto, cuda, or cpu")
 	transcribecppThreads := flag.Int("transcribecpp-threads", envInt("AUDIO_TRANSCRIBECPP_THREADS", cfg.TranscribecppThreads), "transcribe.cpp CPU thread count (0 = automatic)")
+	voxtralRealtimeEnabled := flag.Bool("voxtral-realtime-enabled", cfg.VoxtralRealtimeEnabled, "enable native Voxtral Realtime live STT")
+	voxtralRealtimeAddr := flag.String("voxtral-realtime-addr", env("AUDIO_VOXTRAL_REALTIME_ADDR", valueOr(cfg.VoxtralRealtimeAddr, "http://127.0.0.1:8032")), "Voxtral Realtime sidecar base URL")
+	voxtralRealtimePort := flag.Int("voxtral-realtime-port", envInt("AUDIO_VOXTRAL_REALTIME_PORT", intOr(cfg.VoxtralRealtimePort, 8032)), "local Voxtral Realtime sidecar port")
+	voxtralRealtimeModel := flag.String("voxtral-realtime-model", env("AUDIO_VOXTRAL_REALTIME_MODEL", cfg.VoxtralRealtimeModel), "path to the Voxtral Realtime GGUF model")
+	voxtralRealtimeBackend := flag.String("voxtral-realtime-backend", env("AUDIO_VOXTRAL_REALTIME_BACKEND", valueOr(cfg.VoxtralRealtimeBackend, "cuda")), "Voxtral Realtime backend: auto, cuda, or cpu")
+	voxtralRealtimeThreads := flag.Int("voxtral-realtime-threads", envInt("AUDIO_VOXTRAL_REALTIME_THREADS", cfg.VoxtralRealtimeThreads), "Voxtral Realtime CPU thread count (0 = automatic)")
 	webDir := flag.String("web-dir", env("AUDIO_WEB_DIR", cfg.WebDir), "optional path to static web frontend directory")
 	audioTTL := flag.Int("audio-ttl-seconds", envInt("AUDIO_AUDIO_TTL_SECONDS", cfg.AudioTTLSeconds), "audio file retention in seconds (0 = forever)")
 	audioStoreDir := flag.String("audio-store-dir", env("AUDIO_STORE_DIR", cfg.AudioStoreDir), "directory for generated audio files (empty = in-memory)")
@@ -162,7 +174,7 @@ func main() {
 	workers := map[string]int{espeakProvider.ID(): *maxConcurrency}
 
 	var gpuLifecycle *lifecycle.Manager
-	if strings.TrimSpace(*audiocppBin) != "" || *fasterWhisperEnabled || *transcribecppEnabled {
+	if strings.TrimSpace(*audiocppBin) != "" || *fasterWhisperEnabled || *transcribecppEnabled || *voxtralRealtimeEnabled {
 		maxVRAMMiB, err := resolveVRAMLimit(*maxVRAM)
 		if err != nil {
 			log.Fatalf("GPU VRAM configuration: %v", err)
@@ -224,6 +236,22 @@ func main() {
 				strings.TrimRight(*transcribecppAddr, "/")+"/health",
 				idleDelay,
 				modelVRAM(cfg.ModelVRAMMiB, *transcribecppProviderID, 3200),
+			)
+		}
+		if *sttEnabled && *voxtralRealtimeEnabled && strings.TrimSpace(*transcribecppBin) != "" && strings.TrimSpace(*voxtralRealtimeModel) != "" {
+			gpuLifecycle.RegisterCommandModel(
+				"voxtral-realtime",
+				*transcribecppBin,
+				[]string{
+					"--model", *voxtralRealtimeModel,
+					"--host", "127.0.0.1",
+					"--port", strconv.Itoa(*voxtralRealtimePort),
+					"--backend", *voxtralRealtimeBackend,
+					"--threads", strconv.Itoa(*voxtralRealtimeThreads),
+				},
+				strings.TrimRight(*voxtralRealtimeAddr, "/")+"/health",
+				idleDelay,
+				modelVRAM(cfg.ModelVRAMMiB, "voxtral-realtime", 4800),
 			)
 		}
 	}
@@ -312,6 +340,15 @@ func main() {
 			tc.StartFunc = func() error { return gpuLifecycle.Start(*transcribecppProviderID, false) }
 		}
 		sttProviders = append(sttProviders, tc)
+	}
+	if *sttEnabled && *voxtralRealtimeEnabled && strings.TrimSpace(*voxtralRealtimeModel) != "" {
+		vx := transcribecpp.New("voxtral-realtime", *voxtralRealtimeAddr, nil)
+		vx.LiveEnabled = true
+		vx.LiveAutoLanguage = true
+		if gpuLifecycle != nil && gpuLifecycle.Has("voxtral-realtime") {
+			vx.StartFunc = func() error { return gpuLifecycle.Start("voxtral-realtime", false) }
+		}
+		sttProviders = append(sttProviders, vx)
 	}
 
 	var audioStore *store.Store

@@ -33,9 +33,11 @@ TRANSCRIBECPP_BIN := bin/transcribecpp_server
 TRANSCRIBECPP_SENTINEL := .built-transcribecpp
 COHERE_MODEL := models/cohere-transcribe-03-2026-Q8_0.gguf
 COHERE_MODEL_URL := https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf/resolve/main/cohere-transcribe-03-2026-Q8_0.gguf
+VOXTRAL_MODEL := models/Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf
+VOXTRAL_MODEL_URL := https://huggingface.co/handy-computer/Voxtral-Mini-4B-Realtime-2602-gguf/resolve/main/Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf
 CUDA_HOME ?= /usr/local/cuda
 
-.PHONY: build build-audiocpp build-transcribecpp download-cohere run stop clean
+.PHONY: build build-audiocpp build-transcribecpp download-cohere download-voxtral run stop clean
 
 build:
 	@echo "  → building $(BIN)"
@@ -48,6 +50,8 @@ build-audiocpp: $(AUDIOCPP_SENTINEL)
 build-transcribecpp: $(TRANSCRIBECPP_SENTINEL)
 
 download-cohere: $(COHERE_MODEL)
+
+download-voxtral: $(VOXTRAL_MODEL)
 
 $(AUDIOCPP_SENTINEL):
 	@echo "  → building audiocpp_server (one-time, ~5-10 min)..."
@@ -99,6 +103,12 @@ $(COHERE_MODEL):
 	curl --fail --location --continue-at - --output "$@" "$(COHERE_MODEL_URL)"
 	@echo "  → downloaded $@"
 
+$(VOXTRAL_MODEL):
+	@mkdir -p models
+	@echo "  → downloading Voxtral Realtime Q4 model (~2.8 GB)..."
+	curl --fail --location --continue-at - --output "$@" "$(VOXTRAL_MODEL_URL)"
+	@echo "  → downloaded $@"
+
 run: build
 	@if [ "$(OMNIVOICE)" = "1" ] && [ ! -f "$(AUDIOCPP_SENTINEL)" ]; then \
 		$(MAKE) $(AUDIOCPP_SENTINEL); \
@@ -108,6 +118,9 @@ run: build
 	fi
 	@if [ "$(TRANSCRIBECPP)" = "1" ] && [ ! -f "$(COHERE_MODEL)" ]; then \
 		$(MAKE) $(COHERE_MODEL); \
+	fi
+	@if [ "$(TRANSCRIBECPP)" = "1" ] && [ ! -f "$(VOXTRAL_MODEL)" ]; then \
+		$(MAKE) $(VOXTRAL_MODEL); \
 	fi
 	@mkdir -p $(PIDIR)
 	@fuser -k $(OMNIVOICE_PORT)/tcp 2>/dev/null && sleep 0.5 || true

@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	"github.com/dleiferives/audio-server/internal/provider"
 	"github.com/dleiferives/audio-server/internal/queue"
 	"github.com/dleiferives/audio-server/internal/sttprovider"
@@ -461,6 +463,97 @@ func TestTranscriptionsStreamsPartialText(t *testing.T) {
 	}
 }
 
+func TestLiveTranscriptionRejectsOfflineProvider(t *testing.T) {
+	s := newTestServer(t, fakeProvider{}, Config{SttProviders: []sttprovider.Provider{fakeSttProvider{id: "offline"}}})
+	httpServer := httptest.NewServer(s.Handler())
+	defer httpServer.Close()
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/v1/audio/transcriptions/stream?model=offline"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err == nil {
+		conn.Close()
+		t.Fatal("offline provider unexpectedly accepted a WebSocket")
+	}
+	if resp == nil || resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("response = %+v, want 400", resp)
+	}
+}
+
+func TestLiveTranscriptionCreatesExplicitPostProcessJob(t *testing.T) {
+	live := fakeLiveSttProvider{fakeSttProvider: fakeSttProvider{id: "live"}}
+	refine := fakeSttProvider{
+		id: "refine", result: sttprovider.TranscriptionResult{Text: "refined transcript", ProviderID: "refine"},
+		transcribeHook: func(req sttprovider.TranscriptionRequest) {
+			if !bytes.HasPrefix(req.Audio, []byte("RIFF")) {
+				t.Errorf("post-process input is not WAV: %q", req.Audio[:min(4, len(req.Audio))])
+			}
+		},
+	}
+	s := newTestServer(t, fakeProvider{}, Config{
+		SttProviders: []sttprovider.Provider{live, refine}, DefaultSttProvider: "refine",
+	})
+	httpServer := httptest.NewServer(s.Handler())
+	defer httpServer.Close()
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") +
+		"/v1/audio/transcriptions/stream?model=live&post_process_model=refine&language=en"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	readEvent := func() map[string]any {
+		t.Helper()
+		var event map[string]any
+		if err := conn.ReadJSON(&event); err != nil {
+			t.Fatal(err)
+		}
+		return event
+	}
+	if event := readEvent(); event["type"] != "transcription_session.created" {
+		t.Fatalf("created event = %+v", event)
+	}
+	if err := conn.WriteMessage(websocket.BinaryMessage, []byte{0, 0, 1, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if event := readEvent(); event["type"] != "transcript.text.partial" || event["text"] != "live text" {
+		t.Fatalf("partial event = %+v", event)
+	}
+	if err := conn.WriteJSON(map[string]string{"type": "input_audio.commit"}); err != nil {
+		t.Fatal(err)
+	}
+	if event := readEvent(); event["type"] != "transcript.text.done" {
+		t.Fatalf("done event = %+v", event)
+	}
+	created := readEvent()
+	if created["type"] != "transcription.post_process.created" {
+		t.Fatalf("post-process event = %+v", created)
+	}
+	job := created["job"].(map[string]any)
+	jobID := job["id"].(string)
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(httpServer.URL + "/v1/audio/transcription-jobs/" + jobID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			resp.Body.Close()
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if body["status"] == "succeeded" {
+			if body["text"] != "refined transcript" || body["source_model"] != "live" {
+				t.Fatalf("job response = %+v", body)
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("post-process job did not complete")
+}
+
 func TestTranscriptionsUsesConfiguredDefaultProvider(t *testing.T) {
 	var parakeetCalled bool
 	parakeet := fakeSttProvider{
@@ -799,6 +892,24 @@ type fakeStreamingSttProvider struct {
 	partials []string
 	final    sttprovider.TranscriptionResult
 }
+
+type fakeLiveSttProvider struct {
+	fakeSttProvider
+}
+
+type fakeLiveStream struct{}
+
+func (fakeLiveSttProvider) SupportsLiveStreaming() bool { return true }
+func (fakeLiveSttProvider) OpenLiveStream(context.Context, sttprovider.LiveStreamRequest) (sttprovider.LiveStream, error) {
+	return &fakeLiveStream{}, nil
+}
+func (*fakeLiveStream) Feed(context.Context, []byte) (sttprovider.LiveStreamUpdate, error) {
+	return sttprovider.LiveStreamUpdate{Text: "live text", TentativeText: "live text", Revision: 1, Changed: true}, nil
+}
+func (*fakeLiveStream) Finalize(context.Context) (sttprovider.LiveStreamUpdate, error) {
+	return sttprovider.LiveStreamUpdate{Text: "live text final", CommittedText: "live text final", Revision: 2, Changed: true, Final: true}, nil
+}
+func (*fakeLiveStream) Close() error { return nil }
 
 type fakeRequiredSttProvider struct {
 	fakeSttProvider

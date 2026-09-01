@@ -33,6 +33,7 @@ model_vram_mib:                # conservative residency estimates; tune per GPU/
   qwen3-asr-1.7b: 3584
   faster-whisper: 6000
   cohere-transcribe: 3200
+  voxtral-realtime: 4800
 
 # ── STT ──
 stt_enabled: true
@@ -54,6 +55,14 @@ transcribecpp_port: 8031
 transcribecpp_model: "models/cohere-transcribe-03-2026-Q8_0.gguf"
 transcribecpp_backend: "cuda"
 transcribecpp_threads: 0
+
+# True incremental STT; use the WebSocket endpoint for live PCM audio.
+voxtral_realtime_enabled: true
+voxtral_realtime_addr: "http://127.0.0.1:8032"
+voxtral_realtime_port: 8032
+voxtral_realtime_model: "models/Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf"
+voxtral_realtime_backend: "cuda"
+voxtral_realtime_threads: 0
 
 # ── alignment (MFA) ──
 align_enabled: true

@@ -80,7 +80,7 @@ List available voices, optionally filtered by language.
 
 ### `GET /v1/audio/capabilities`
 
-Returns the complete TTS catalog exposed by this audio-server instance. The
+Returns the complete TTS and STT catalog exposed by this audio-server instance. The
 top-level `languages` list is the union across providers. Each provider lists
 its supported languages and canonical voice definitions. To get voices
 compatible with one selected language, call `/v1/audio/voices` with both
@@ -98,6 +98,10 @@ compatible with one selected language, call `/v1/audio/voices` with both
         {"provider": "supertonic", "voice": "M1", "language": "en", "name": "Male 1"}
       ]
     }
+  ],
+  "stt_providers": [
+    {"provider": "cohere-transcribe", "live_streaming": false},
+    {"provider": "voxtral-realtime", "live_streaming": true}
   ]
 }
 ```
@@ -255,7 +259,7 @@ Fetch the result of a finished job. Same response headers as
 
 ### `POST /v1/audio/transcriptions`
 
-Speech-to-text, OpenAI-compatible: `multipart/form-data`, synchronous (no job queue involved — see `docs/providers.md` for why STT doesn't route through `internal/queue` the way TTS does). Parakeet is the default provider in `config.yml`; the endpoint returns `503` if no STT provider is configured.
+Speech-to-text, OpenAI-compatible: `multipart/form-data`, synchronous (no job queue involved — see `docs/providers.md` for why STT doesn't route through `internal/queue` the way TTS does). Cohere Transcribe is the default provider in `config.yml`; the endpoint returns `503` if no STT provider is configured.
 
 ```bash
 curl -sS http://127.0.0.1:8010/v1/audio/transcriptions \
@@ -268,7 +272,7 @@ curl -sS http://127.0.0.1:8010/v1/audio/transcriptions \
 | Field | Required | Description |
 |---|---|---|
 | `file` | yes | Audio file. Common formats supported by ffmpeg are accepted, including WAV, MP3, Ogg/Opus, FLAC, and M4A. The server automatically converts audio to the selected provider's required sample rate, channel count, codec, and container. |
-| `model` | no | Provider ID (`parakeet`, `nemotron`, or `faster-whisper`). `whisper-1`, `auto`, or blank map to the configured default. |
+| `model` | no | Provider ID (`cohere-transcribe`, `voxtral-realtime`, `parakeet`, `nemotron`, or `faster-whisper`). `whisper-1`, `auto`, or blank map to the configured default. |
 | `language` | no | ISO-639-1/BCP-47 language hint (e.g. `en`). Omit to let the model auto-detect. |
 | `response_format` | no | `json` (default, `{"text": "..."}`) or `text` (plain body). |
 | `stream` | no | `true` emits cumulative partial transcripts as server-sent events. Requires a streaming-capable provider such as Parakeet. |
@@ -296,6 +300,59 @@ The response emits cumulative `transcript.text.delta` events, one
 | 401 | Missing or invalid API key (when `AUDIO_API_KEY` is set) |
 | 503 | No STT provider configured, or the provider is unavailable |
 | 504 | Timed out |
+
+---
+
+### `GET /v1/audio/transcriptions/stream` (WebSocket)
+
+True duplex live transcription. This route upgrades to WebSocket and accepts
+only models whose runtime advertises native incremental streaming. Selecting
+an offline model such as `cohere-transcribe` returns `400`; the server never
+pretends that repeated full-file decoding is live streaming.
+
+Query parameters:
+
+| Parameter | Required | Description |
+|---|---|---|
+| `model` | yes | A live model, currently `voxtral-realtime`. |
+| `language` | no | Optional BCP-47 hint. Voxtral Realtime auto-detects. |
+| `post_process_model` | no | Explicitly request a separate buffered final pass, for example `cohere-transcribe`. If omitted, no second pass or job is created. |
+
+After the `transcription_session.created` event, send binary WebSocket frames
+containing mono 16 kHz signed PCM16 little-endian audio. The server emits
+`transcript.text.partial` snapshots as the model advances. Finish with:
+
+```json
+{"type":"input_audio.commit"}
+```
+
+The final live event is `transcript.text.done`. When `post_process_model` was
+requested, it is followed by:
+
+```json
+{
+  "type": "transcription.post_process.created",
+  "job": {
+    "id": "stt_…",
+    "model": "cohere-transcribe",
+    "status": "queued",
+    "status_url": "/v1/audio/transcription-jobs/stt_…"
+  }
+}
+```
+
+The live transcript remains usable immediately; refinement runs only after the
+stream releases its GPU execution lease.
+
+---
+
+### `GET /v1/audio/transcription-jobs/{id}`
+
+Poll the optional post-stream pass. States are `queued`, `running`,
+`succeeded`, or `failed`. A succeeded response includes `text`, `language`,
+and `duration`, along with `model` and the original `source_model`. These jobs
+exist only when the WebSocket request explicitly supplied
+`post_process_model`.
 
 ## Authentication
 

@@ -10,6 +10,7 @@ Build the CUDA runtime and sidecar, then download the default model:
 ```bash
 make build-transcribecpp
 make download-cohere
+make download-voxtral
 ```
 
 The main audio server starts the sidecar on the first matching STT request.
@@ -23,3 +24,13 @@ To run it directly:
 
 The audio server normalizes WAV, MP3, Opus, and other ffmpeg-decodable uploads
 to the mono 16 kHz WAV input required by transcribe.cpp.
+
+## True live streaming
+
+Voxtral Realtime is exposed as `voxtral-realtime` through
+`GET /v1/audio/transcriptions/stream`, a WebSocket endpoint. Send mono 16 kHz
+PCM16LE binary frames and finish with `{"type":"input_audio.commit"}`.
+
+Add `post_process_model=cohere-transcribe` to the WebSocket query only when a
+separate, asynchronous Cohere final pass is desired. The server then emits a
+linked transcription job ID; it never runs this extra pass implicitly.

@@ -78,7 +78,8 @@ bool write_all(int fd, const char * data, size_t size) {
 
 void respond(int fd, int status, const std::string & body) {
     const char * reason = status == 200 ? "OK" : status == 400 ? "Bad Request" : status == 404 ? "Not Found" :
-                                                                  "Internal Server Error";
+                                             status == 409       ? "Conflict" :
+                                                                   "Internal Server Error";
     const std::string header = "HTTP/1.1 " + std::to_string(status) + " " + reason +
                                "\r\nContent-Type: application/json\r\nContent-Length: " +
                                std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n";
@@ -228,6 +229,38 @@ bool write_temp_wav(const std::vector<char> & body, std::string & path, std::str
     return true;
 }
 
+std::string stream_snapshot(transcribe_session * session, const transcribe_stream_update & update) {
+    transcribe_stream_text text;
+    transcribe_stream_text_init(&text);
+    const transcribe_status status = transcribe_stream_get_text(session, &text);
+    if (status != TRANSCRIBE_OK) {
+        return "{\"error\":{\"message\":\"stream snapshot failed: " +
+               json_escape(transcribe_status_string(status)) + "\"}}";
+    }
+    return "{\"text\":\"" + json_escape(text.full_text) + "\",\"committed_text\":\"" +
+           json_escape(text.committed_text) + "\",\"tentative_text\":\"" + json_escape(text.tentative_text) +
+           "\",\"revision\":" + std::to_string(update.revision) +
+           ",\"input_ms\":" + std::to_string(update.input_received_ms) +
+           ",\"buffered_ms\":" + std::to_string(update.buffered_ms) +
+           ",\"changed\":" + (update.result_changed ? "true" : "false") +
+           ",\"final\":" + (update.is_final ? "true" : "false") + "}";
+}
+
+bool pcm16_to_float(const std::vector<char> & bytes, std::vector<float> & pcm, std::string & error) {
+    if (bytes.empty() || bytes.size() % 2 != 0) {
+        error = "PCM body must contain complete signed 16-bit little-endian samples";
+        return false;
+    }
+    pcm.resize(bytes.size() / 2);
+    for (size_t i = 0; i < pcm.size(); ++i) {
+        const uint16_t lo = static_cast<unsigned char>(bytes[i * 2]);
+        const uint16_t hi = static_cast<unsigned char>(bytes[i * 2 + 1]);
+        const int16_t sample = static_cast<int16_t>(lo | (hi << 8));
+        pcm[i] = static_cast<float>(sample) / 32768.0f;
+    }
+    return true;
+}
+
 }  // namespace
 
 int main(int argc, char ** argv) {
@@ -286,7 +319,74 @@ int main(int argc, char ** argv) {
             continue;
         }
         if (request.method != "POST" || request.path != "/transcribe") {
+            if (request.method == "POST" && request.path == "/stream/begin") {
+                if (transcribe_stream_get_state(session) == TRANSCRIBE_STREAM_ACTIVE) {
+                    respond(client, 409, "{\"error\":{\"message\":\"a stream is already active\"}}");
+                } else {
+                    transcribe_run_params run_params;
+                    transcribe_run_params_init(&run_params);
+                    std::string language;
+                    if (const auto it = request.headers.find("x-transcribe-language"); it != request.headers.end()) {
+                        language = trim(it->second);
+                        if (!language.empty() && language != "auto") run_params.language = language.c_str();
+                    }
+                    transcribe_stream_params stream_params;
+                    transcribe_stream_params_init(&stream_params);
+                    const transcribe_status status = transcribe_stream_begin(session, &run_params, &stream_params);
+                    if (status == TRANSCRIBE_OK) {
+                        respond(client, 200, "{\"status\":\"ready\"}");
+                    } else {
+                        respond(client, 400, "{\"error\":{\"message\":\"stream begin failed: " +
+                                                 json_escape(transcribe_status_string(status)) + "\"}}");
+                    }
+                }
+                close(client);
+                continue;
+            }
+            if (request.method == "POST" && request.path == "/stream/feed") {
+                std::vector<float> pcm;
+                if (!pcm16_to_float(request.body, pcm, error)) {
+                    respond(client, 400, "{\"error\":{\"message\":\"" + json_escape(error.c_str()) + "\"}}");
+                } else {
+                    transcribe_stream_update update;
+                    transcribe_stream_update_init(&update);
+                    const transcribe_status status =
+                        transcribe_stream_feed(session, pcm.data(), static_cast<int>(pcm.size()), &update);
+                    if (status == TRANSCRIBE_OK) {
+                        respond(client, 200, stream_snapshot(session, update));
+                    } else {
+                        respond(client, 400, "{\"error\":{\"message\":\"stream feed failed: " +
+                                                 json_escape(transcribe_status_string(status)) + "\"}}");
+                    }
+                }
+                close(client);
+                continue;
+            }
+            if (request.method == "POST" && request.path == "/stream/finalize") {
+                transcribe_stream_update update;
+                transcribe_stream_update_init(&update);
+                const transcribe_status status = transcribe_stream_finalize(session, &update);
+                if (status == TRANSCRIBE_OK) {
+                    respond(client, 200, stream_snapshot(session, update));
+                } else {
+                    respond(client, 400, "{\"error\":{\"message\":\"stream finalize failed: " +
+                                             json_escape(transcribe_status_string(status)) + "\"}}");
+                }
+                close(client);
+                continue;
+            }
+            if (request.method == "POST" && request.path == "/stream/reset") {
+                transcribe_stream_reset(session);
+                respond(client, 200, "{\"status\":\"reset\"}");
+                close(client);
+                continue;
+            }
             respond(client, 404, "{\"error\":{\"message\":\"not found\"}}");
+            close(client);
+            continue;
+        }
+        if (transcribe_stream_get_state(session) == TRANSCRIBE_STREAM_ACTIVE) {
+            respond(client, 409, "{\"error\":{\"message\":\"cannot run offline transcription during an active stream\"}}");
             close(client);
             continue;
         }

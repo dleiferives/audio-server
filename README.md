@@ -10,6 +10,7 @@ A standalone audio manager service for TTS and STT. Exposes OpenAI-compatible sp
 | `omnivoice` | HTTP sidecar (TTS, Python / GPU) | shipped, requires `AUDIO_OMNIVOICE_ADDR` |
 | `kokoro` | HTTP sidecar (TTS, Python / GPU or CPU) | shipped, requires `AUDIO_KOKORO_ADDR` |
 | `cohere-transcribe` | transcribe.cpp sidecar (STT, native CUDA/CPU) | shipped, configured as the default STT provider |
+| `voxtral-realtime` | transcribe.cpp sidecar (true streaming STT, native CUDA/CPU) | shipped |
 | `parakeet` | audio.cpp sidecar (STT, native CUDA/CPU) | shipped |
 | `nemotron` | audio.cpp sidecar (streaming-capable STT, native CUDA/CPU) | shipped |
 | `faster-whisper` | HTTP sidecar (STT, Python / GPU or CPU) | shipped, requires `AUDIO_FASTERWHISPER_ADDR` |
@@ -42,6 +43,7 @@ go build -o bin/audio-server ./cmd/audio
 # Native transcribe.cpp CUDA sidecar + default Cohere Q8 model
 make build-transcribecpp
 make download-cohere
+make download-voxtral
 ```
 
 ## Generate speech
@@ -91,9 +93,11 @@ transcribe.cpp runtime by default. Set `model=parakeet`, `model=nemotron`, or
 
 The web UI also supports a live microphone mode. Open
 `http://127.0.0.1:8010`, click **Start live mic**, and keep speaking. The
-browser captures mono PCM continuously and refreshes the cumulative Parakeet
-transcript about every three seconds; pressing **Stop live mic** sends one
-final snapshot.
+browser sends mono PCM continuously to Voxtral Realtime and renders native
+incremental hypotheses. The same API is available at
+`/v1/audio/transcriptions/stream?model=voxtral-realtime`. An optional
+`post_process_model=cohere-transcribe` query parameter explicitly requests an
+asynchronous high-accuracy final pass and returns a linked job ID.
 
 ## List voices
 
