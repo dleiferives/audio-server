@@ -10,3 +10,6 @@
 [submodule "transcribe.cpp"]
 	path = transcribe.cpp
 	url = https://github.com/handy-computer/transcribe.cpp.git
+[submodule "wespeaker"]
+	path = wespeaker
+	url = https://github.com/wenet-e2e/wespeaker.git

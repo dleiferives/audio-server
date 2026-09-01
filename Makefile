@@ -4,6 +4,7 @@ OMNIVOICE     ?= 1
 KOKORO        ?= 0
 ALIGN         ?= 0
 TRANSCRIBECPP ?= 1
+WESPEAKER     ?= 1
 
 # ── ports ──
 SERVER_PORT    ?= 8010
@@ -31,13 +32,25 @@ AUDIOCPP_SENTINEL := .built-audiocpp
 TRANSCRIBECPP_BUILD := transcribe.cpp/build/linux-cuda-release
 TRANSCRIBECPP_BIN := bin/transcribecpp_server
 TRANSCRIBECPP_SENTINEL := .built-transcribecpp
+WESPEAKER_BUILD := wespeaker/runtime/onnxruntime/build
+WESPEAKER_BIN := bin/wespeaker_server
+WESPEAKER_SENTINEL := .built-wespeaker
+WESPEAKER_MODEL := models/wespeaker/voxceleb_gemini_dfresnet114_LM.onnx
+WESPEAKER_MODEL_URL := https://huggingface.co/Wespeaker/wespeaker-voxceleb-gemini-DFresnet114-LM/resolve/main/voxceleb_gemini_dfresnet114_LM.onnx
+WESPEAKER_MODEL_SHA256 := 269445cc5c6c0b5324a7ae6f89713ad478bf20a1eda596f74aa530154622c41e
+SORTFORMER_MODEL := models/Sortformer-Diar-4spk-v1-GGUF/sortformer-diar-4spk-v1-q8_0.gguf
+SORTFORMER_MODEL_URL := https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/Sortformer-Diar-4spk-v1-GGUF/sortformer-diar-4spk-v1-q8_0.gguf
+SORTFORMER_MODEL_SHA256 := 4fa6a3e30c4a1c6cc1da455268806edc93432ca1e1b5b6923e942be8e6e479ff
+BS_ROFORMER_MODEL := models/BS-RoFormer-ep368_Q8/BS-RoFormer-ep368_Q8.gguf
+BS_ROFORMER_MODEL_URL := https://huggingface.co/mirek190/audio.cpp/resolve/main/vocal%20separation%20models/BS-RoFormer-ep368_Q8.gguf
+BS_ROFORMER_MODEL_SHA256 := 9a55a8cad369d00f6e0fb208bb0cd87e30e25430772b8491e20a4eace6423ad2
 COHERE_MODEL := models/cohere-transcribe-03-2026-Q8_0.gguf
 COHERE_MODEL_URL := https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf/resolve/main/cohere-transcribe-03-2026-Q8_0.gguf
 VOXTRAL_MODEL := models/Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf
 VOXTRAL_MODEL_URL := https://huggingface.co/handy-computer/Voxtral-Mini-4B-Realtime-2602-gguf/resolve/main/Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf
 CUDA_HOME ?= /usr/local/cuda
 
-.PHONY: build build-audiocpp build-transcribecpp download-cohere download-voxtral run stop clean
+.PHONY: build build-audiocpp build-transcribecpp build-wespeaker download-cohere download-voxtral download-wespeaker download-sortformer download-bs-roformer run stop clean
 
 build:
 	@echo "  → building $(BIN)"
@@ -49,9 +62,17 @@ build-audiocpp: $(AUDIOCPP_SENTINEL)
 
 build-transcribecpp: $(TRANSCRIBECPP_SENTINEL)
 
+build-wespeaker: $(WESPEAKER_SENTINEL)
+
 download-cohere: $(COHERE_MODEL)
 
 download-voxtral: $(VOXTRAL_MODEL)
+
+download-wespeaker: $(WESPEAKER_MODEL)
+
+download-sortformer: $(SORTFORMER_MODEL)
+
+download-bs-roformer: $(BS_ROFORMER_MODEL)
 
 $(AUDIOCPP_SENTINEL):
 	@echo "  → building audiocpp_server (one-time, ~5-10 min)..."
@@ -97,6 +118,30 @@ $(TRANSCRIBECPP_SENTINEL): stt/transcribecpp/server.cpp
 	@touch $(TRANSCRIBECPP_SENTINEL)
 	@echo "  → transcribecpp_server built"
 
+$(WESPEAKER_SENTINEL): speaker/wespeaker/server.cpp
+	@echo "  → building official WeSpeaker C++ ONNX runtime and sidecar..."
+	cmake -S wespeaker/runtime/onnxruntime -B $(WESPEAKER_BUILD) -G Ninja \
+		-DCMAKE_BUILD_TYPE=Release -DONNX=ON -DGPU=OFF
+	cmake --build $(WESPEAKER_BUILD) -j "$$(nproc)"
+	@mkdir -p bin
+	c++ -std=c++17 -O3 -DNDEBUG -DUSE_ONNX \
+		-Iwespeaker/runtime/core \
+		-Iwespeaker/runtime/onnxruntime/fc_base/onnxruntime-src/include \
+		-Iwespeaker/runtime/onnxruntime/fc_base/glog-src/src \
+		-Iwespeaker/runtime/onnxruntime/fc_base/glog-build \
+		-Iwespeaker/runtime/onnxruntime/fc_base/gflags-build/include \
+		speaker/wespeaker/server.cpp -o $(WESPEAKER_BIN) \
+		$(WESPEAKER_BUILD)/speaker/libspeaker.a \
+		$(WESPEAKER_BUILD)/frontend/libfrontend.a \
+		$(WESPEAKER_BUILD)/utils/libutils.a \
+		wespeaker/runtime/onnxruntime/fc_base/glog-build/libglog.a \
+		wespeaker/runtime/onnxruntime/fc_base/gflags-build/libgflags_nothreads.a \
+		-Lwespeaker/runtime/onnxruntime/fc_base/onnxruntime-src/lib \
+		-Wl,-rpath,'$$ORIGIN/../wespeaker/runtime/onnxruntime/fc_base/onnxruntime-src/lib' \
+		-lonnxruntime -ldl -pthread
+	@touch $(WESPEAKER_SENTINEL)
+	@echo "  → wespeaker_server built"
+
 $(COHERE_MODEL):
 	@mkdir -p models
 	@echo "  → downloading Cohere Transcribe Q8 model (~2.4 GB)..."
@@ -107,6 +152,27 @@ $(VOXTRAL_MODEL):
 	@mkdir -p models
 	@echo "  → downloading Voxtral Realtime Q4 model (~2.8 GB)..."
 	curl --fail --location --continue-at - --output "$@" "$(VOXTRAL_MODEL_URL)"
+	@echo "  → downloaded $@"
+
+$(WESPEAKER_MODEL):
+	@mkdir -p models/wespeaker
+	@echo "  → downloading WeSpeaker Gemini DF-ResNet114-LM ONNX model (~25 MB)..."
+	curl --fail --location --continue-at - --output "$@" "$(WESPEAKER_MODEL_URL)"
+	@echo "$(WESPEAKER_MODEL_SHA256)  $@" | sha256sum --check --strict
+	@echo "  → downloaded $@"
+
+$(SORTFORMER_MODEL):
+	@mkdir -p models/Sortformer-Diar-4spk-v1-GGUF
+	@echo "  → downloading Sortformer diarization Q8 model (~168 MB)..."
+	curl --fail --location --continue-at - --output "$@" "$(SORTFORMER_MODEL_URL)"
+	@echo "$(SORTFORMER_MODEL_SHA256)  $@" | sha256sum --check --strict
+	@echo "  → downloaded $@"
+
+$(BS_ROFORMER_MODEL):
+	@mkdir -p models/BS-RoFormer-ep368_Q8
+	@echo "  → downloading BS-RoFormer vocals Q8 model (~165 MB)..."
+	curl --fail --location --continue-at - --output "$@" "$(BS_ROFORMER_MODEL_URL)"
+	@echo "$(BS_ROFORMER_MODEL_SHA256)  $@" | sha256sum --check --strict
 	@echo "  → downloaded $@"
 
 run: build
@@ -121,6 +187,18 @@ run: build
 	fi
 	@if [ "$(TRANSCRIBECPP)" = "1" ] && [ ! -f "$(VOXTRAL_MODEL)" ]; then \
 		$(MAKE) $(VOXTRAL_MODEL); \
+	fi
+	@if [ "$(WESPEAKER)" = "1" ] && [ ! -f "$(WESPEAKER_SENTINEL)" ]; then \
+		$(MAKE) $(WESPEAKER_SENTINEL); \
+	fi
+	@if [ "$(WESPEAKER)" = "1" ] && [ ! -f "$(WESPEAKER_MODEL)" ]; then \
+		$(MAKE) $(WESPEAKER_MODEL); \
+	fi
+	@if [ "$(WESPEAKER)" = "1" ] && [ ! -f "$(SORTFORMER_MODEL)" ]; then \
+		$(MAKE) $(SORTFORMER_MODEL); \
+	fi
+	@if [ "$(WESPEAKER)" = "1" ] && [ ! -f "$(BS_ROFORMER_MODEL)" ]; then \
+		$(MAKE) $(BS_ROFORMER_MODEL); \
 	fi
 	@mkdir -p $(PIDIR)
 	@fuser -k $(OMNIVOICE_PORT)/tcp 2>/dev/null && sleep 0.5 || true
@@ -164,9 +242,9 @@ stop:
 	@echo "  → all stopped"
 
 clean:
-	rm -rf $(BIN) $(TRANSCRIBECPP_BIN) $(PIDIR) $(AUDIOCPP_SENTINEL) $(TRANSCRIBECPP_SENTINEL)
+	rm -rf $(BIN) $(TRANSCRIBECPP_BIN) $(WESPEAKER_BIN) $(PIDIR) $(AUDIOCPP_SENTINEL) $(TRANSCRIBECPP_SENTINEL) $(WESPEAKER_SENTINEL)
 	@echo "  → cleaned (use make clean-all to also remove audio.cpp build dir)"
 
 clean-all: clean
-	rm -rf audio.cpp/build transcribe.cpp/build
+	rm -rf audio.cpp/build transcribe.cpp/build wespeaker/runtime/onnxruntime/build wespeaker/runtime/onnxruntime/fc_base
 	@echo "  → fully cleaned (downloaded models retained)"

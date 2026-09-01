@@ -34,6 +34,8 @@ model_vram_mib:                # conservative residency estimates; tune per GPU/
   faster-whisper: 6000
   cohere-transcribe: 3200
   voxtral-realtime: 4800
+  sortformer: 512
+  bs-roformer: 2048
 
 # ── STT ──
 stt_enabled: true
@@ -63,6 +65,19 @@ voxtral_realtime_port: 8032
 voxtral_realtime_model: "models/Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf"
 voxtral_realtime_backend: "cuda"
 voxtral_realtime_threads: 0
+
+# ── autodubbing analysis ──
+analysis_enabled: true
+analysis_max_upload_mib: 2048
+sortformer_addr: "http://127.0.0.1:8033"
+sortformer_port: 8033
+bs_roformer_addr: "http://127.0.0.1:8035"
+bs_roformer_port: 8035
+wespeaker_enabled: true
+wespeaker_addr: "http://127.0.0.1:8034"
+wespeaker_port: 8034
+wespeaker_bin: "bin/wespeaker_server"
+wespeaker_model: "models/wespeaker/voxceleb_gemini_dfresnet114_LM.onnx"
 
 # ── alignment (MFA) ──
 align_enabled: true

@@ -1,0 +1,18 @@
+{
+  "host": "127.0.0.1",
+  "port": 8035,
+  "backend": "cuda",
+  "device": 0,
+  "threads": 12,
+  "lazy_load": true,
+  "model_spec_override": "../audio.cpp/model_specs",
+  "models": [
+    {
+      "id": "bs-roformer",
+      "family": "bs_roformer",
+      "path": "../models/BS-RoFormer-ep368_Q8/BS-RoFormer-ep368_Q8.gguf",
+      "task": "sep",
+      "mode": "offline"
+    }
+  ]
+}

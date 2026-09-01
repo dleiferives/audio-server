@@ -16,10 +16,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dleiferives/audio-server/internal/analysisjob"
+	"github.com/dleiferives/audio-server/internal/analysisprovider"
 	"github.com/dleiferives/audio-server/internal/encode"
 	"github.com/dleiferives/audio-server/internal/lifecycle"
 	"github.com/dleiferives/audio-server/internal/provider"
 	"github.com/dleiferives/audio-server/internal/provider/align"
+	"github.com/dleiferives/audio-server/internal/provider/bsroformer"
 	"github.com/dleiferives/audio-server/internal/provider/espeak"
 	"github.com/dleiferives/audio-server/internal/provider/fasterwhisper"
 	"github.com/dleiferives/audio-server/internal/provider/kokoro"
@@ -27,8 +30,10 @@ import (
 	"github.com/dleiferives/audio-server/internal/provider/omnivoice"
 	"github.com/dleiferives/audio-server/internal/provider/parakeet"
 	"github.com/dleiferives/audio-server/internal/provider/qwen3asr"
+	"github.com/dleiferives/audio-server/internal/provider/sortformer"
 	"github.com/dleiferives/audio-server/internal/provider/supertonic"
 	"github.com/dleiferives/audio-server/internal/provider/transcribecpp"
+	"github.com/dleiferives/audio-server/internal/provider/wespeaker"
 	"github.com/dleiferives/audio-server/internal/queue"
 	"github.com/dleiferives/audio-server/internal/server"
 	"github.com/dleiferives/audio-server/internal/store"
@@ -90,6 +95,17 @@ type configFile struct {
 	VoxtralRealtimeModel      string         `yaml:"voxtral_realtime_model"`
 	VoxtralRealtimeBackend    string         `yaml:"voxtral_realtime_backend"`
 	VoxtralRealtimeThreads    int            `yaml:"voxtral_realtime_threads"`
+	AnalysisEnabled           bool           `yaml:"analysis_enabled"`
+	AnalysisMaxUploadMiB      int            `yaml:"analysis_max_upload_mib"`
+	SortformerAddr            string         `yaml:"sortformer_addr"`
+	SortformerPort            int            `yaml:"sortformer_port"`
+	BSRoformerAddr            string         `yaml:"bs_roformer_addr"`
+	BSRoformerPort            int            `yaml:"bs_roformer_port"`
+	WespeakerEnabled          bool           `yaml:"wespeaker_enabled"`
+	WespeakerAddr             string         `yaml:"wespeaker_addr"`
+	WespeakerPort             int            `yaml:"wespeaker_port"`
+	WespeakerBin              string         `yaml:"wespeaker_bin"`
+	WespeakerModel            string         `yaml:"wespeaker_model"`
 	AlignEnabled              bool           `yaml:"align_enabled"`
 	AlignMFAEnv               string         `yaml:"align_mfa_env"`
 	AlignMFAWorkDir           string         `yaml:"align_mfa_work_dir"`
@@ -159,6 +175,17 @@ func main() {
 	voxtralRealtimeModel := flag.String("voxtral-realtime-model", env("AUDIO_VOXTRAL_REALTIME_MODEL", cfg.VoxtralRealtimeModel), "path to the Voxtral Realtime GGUF model")
 	voxtralRealtimeBackend := flag.String("voxtral-realtime-backend", env("AUDIO_VOXTRAL_REALTIME_BACKEND", valueOr(cfg.VoxtralRealtimeBackend, "cuda")), "Voxtral Realtime backend: auto, cuda, or cpu")
 	voxtralRealtimeThreads := flag.Int("voxtral-realtime-threads", envInt("AUDIO_VOXTRAL_REALTIME_THREADS", cfg.VoxtralRealtimeThreads), "Voxtral Realtime CPU thread count (0 = automatic)")
+	analysisEnabled := flag.Bool("analysis-enabled", cfg.AnalysisEnabled, "enable asynchronous diarization and speaker-embedding jobs")
+	analysisMaxUploadMiB := flag.Int("analysis-max-upload-mib", envInt("AUDIO_ANALYSIS_MAX_UPLOAD_MIB", intOr(cfg.AnalysisMaxUploadMiB, 2048)), "maximum uploaded audio/video size for an analysis job")
+	sortformerAddr := flag.String("sortformer-addr", env("AUDIO_SORTFORMER_ADDR", valueOr(cfg.SortformerAddr, "http://127.0.0.1:8033")), "Sortformer audio.cpp sidecar base URL")
+	sortformerPort := flag.Int("sortformer-port", envInt("AUDIO_SORTFORMER_PORT", intOr(cfg.SortformerPort, 8033)), "local Sortformer sidecar port")
+	bsRoformerAddr := flag.String("bs-roformer-addr", env("AUDIO_BS_ROFORMER_ADDR", valueOr(cfg.BSRoformerAddr, "http://127.0.0.1:8035")), "BS-RoFormer audio.cpp sidecar base URL")
+	bsRoformerPort := flag.Int("bs-roformer-port", envInt("AUDIO_BS_ROFORMER_PORT", intOr(cfg.BSRoformerPort, 8035)), "local BS-RoFormer sidecar port")
+	wespeakerEnabled := flag.Bool("wespeaker-enabled", cfg.WespeakerEnabled, "enable native WeSpeaker speaker embeddings")
+	wespeakerAddr := flag.String("wespeaker-addr", env("AUDIO_WESPEAKER_ADDR", valueOr(cfg.WespeakerAddr, "http://127.0.0.1:8034")), "WeSpeaker sidecar base URL")
+	wespeakerPort := flag.Int("wespeaker-port", envInt("AUDIO_WESPEAKER_PORT", intOr(cfg.WespeakerPort, 8034)), "local WeSpeaker sidecar port")
+	wespeakerBin := flag.String("wespeaker-bin", env("AUDIO_WESPEAKER_BIN", valueOr(cfg.WespeakerBin, "bin/wespeaker_server")), "path to native WeSpeaker sidecar")
+	wespeakerModel := flag.String("wespeaker-model", env("AUDIO_WESPEAKER_MODEL", cfg.WespeakerModel), "path to WeSpeaker ONNX speaker model")
 	webDir := flag.String("web-dir", env("AUDIO_WEB_DIR", cfg.WebDir), "optional path to static web frontend directory")
 	audioTTL := flag.Int("audio-ttl-seconds", envInt("AUDIO_AUDIO_TTL_SECONDS", cfg.AudioTTLSeconds), "audio file retention in seconds (0 = forever)")
 	audioStoreDir := flag.String("audio-store-dir", env("AUDIO_STORE_DIR", cfg.AudioStoreDir), "directory for generated audio files (empty = in-memory)")
@@ -174,7 +201,7 @@ func main() {
 	workers := map[string]int{espeakProvider.ID(): *maxConcurrency}
 
 	var gpuLifecycle *lifecycle.Manager
-	if strings.TrimSpace(*audiocppBin) != "" || *fasterWhisperEnabled || *transcribecppEnabled || *voxtralRealtimeEnabled {
+	if strings.TrimSpace(*audiocppBin) != "" || *fasterWhisperEnabled || *transcribecppEnabled || *voxtralRealtimeEnabled || *analysisEnabled {
 		maxVRAMMiB, err := resolveVRAMLimit(*maxVRAM)
 		if err != nil {
 			log.Fatalf("GPU VRAM configuration: %v", err)
@@ -203,6 +230,19 @@ func main() {
 		}
 		if strings.TrimSpace(*audiocppBin) != "" && *qwen3ASR17Enabled {
 			gpuLifecycle.RegisterModel("qwen3-asr-1.7b", "audiocpp-configs/qwen3-asr-1.7b.json", 8028, idleDelay, modelVRAM(cfg.ModelVRAMMiB, "qwen3-asr-1.7b", 3584))
+		}
+		if *analysisEnabled && strings.TrimSpace(*audiocppBin) != "" && strings.TrimSpace(*sortformerAddr) != "" {
+			gpuLifecycle.RegisterModel("sortformer", "audiocpp-configs/sortformer.json", *sortformerPort, idleDelay, modelVRAM(cfg.ModelVRAMMiB, "sortformer", 512))
+		}
+		if *analysisEnabled && strings.TrimSpace(*audiocppBin) != "" && strings.TrimSpace(*bsRoformerAddr) != "" {
+			gpuLifecycle.RegisterModel("bs-roformer", "audiocpp-configs/bs-roformer.json", *bsRoformerPort, idleDelay, modelVRAM(cfg.ModelVRAMMiB, "bs-roformer", 2048))
+		}
+		if *analysisEnabled && *wespeakerEnabled && strings.TrimSpace(*wespeakerBin) != "" && strings.TrimSpace(*wespeakerModel) != "" {
+			gpuLifecycle.RegisterCommandModel(
+				"wespeaker", *wespeakerBin,
+				[]string{"--model", *wespeakerModel, "--host", "127.0.0.1", "--port", strconv.Itoa(*wespeakerPort)},
+				strings.TrimRight(*wespeakerAddr, "/")+"/health", 0, 0,
+			)
 		}
 		if *fasterWhisperEnabled && strings.TrimSpace(*fasterWhisperPython) != "" && strings.TrimSpace(*fasterWhisperScript) != "" {
 			gpuLifecycle.RegisterCommandModel(
@@ -368,21 +408,52 @@ func main() {
 		log.Printf("alignment: enabled (%d languages)", len(langMap))
 	}
 
+	var analysisJobs *analysisjob.Manager
+	if *analysisEnabled {
+		diarizer := sortformer.New(*sortformerAddr, nil)
+		if gpuLifecycle != nil && gpuLifecycle.Has("sortformer") {
+			diarizer.StartFunc = func() error { return gpuLifecycle.Start("sortformer", false) }
+		}
+		separator := bsroformer.New(*bsRoformerAddr, nil)
+		if gpuLifecycle != nil && gpuLifecycle.Has("bs-roformer") {
+			separator.StartFunc = func() error { return gpuLifecycle.Start("bs-roformer", false) }
+		}
+		var embedder analysisprovider.Embedder
+		if *wespeakerEnabled {
+			provider := wespeaker.New(*wespeakerAddr, nil)
+			if gpuLifecycle != nil && gpuLifecycle.Has("wespeaker") {
+				provider.StartFunc = func() error { return gpuLifecycle.Start("wespeaker", false) }
+			}
+			embedder = provider
+		}
+		transcribers := make(map[string]sttprovider.Provider, len(sttProviders))
+		for _, provider := range sttProviders {
+			transcribers[provider.ID()] = provider
+		}
+		analysisJobs = analysisjob.New(analysisjob.Config{
+			Diarizer: diarizer, Embedder: embedder, Separator: separator, AudioNormalizer: encoder,
+			Transcribers: transcribers, DefaultTranscriber: *defaultSttProvider,
+			RunGate: gpuRunGate(gpuLifecycle), Timeout: requestTimeout,
+		})
+	}
+
 	audioServer, err := server.New(server.Config{
-		Providers:          providers,
-		DefaultProvider:    *defaultProvider,
-		APIKey:             *apiKey,
-		MaxInputChars:      *maxInputChars,
-		RequestTimeout:     requestTimeout,
-		Queue:              jobQueue,
-		StreamWorkers:      workers,
-		SttProviders:       sttProviders,
-		DefaultSttProvider: *defaultSttProvider,
-		SttAudioNormalizer: encoder,
-		SttRunGate:         gpuRunGate(gpuLifecycle),
-		WebDir:             *webDir,
-		AudioStore:         audioStore,
-		AlignProvider:      alignProvider,
+		Providers:              providers,
+		DefaultProvider:        *defaultProvider,
+		APIKey:                 *apiKey,
+		MaxInputChars:          *maxInputChars,
+		RequestTimeout:         requestTimeout,
+		Queue:                  jobQueue,
+		StreamWorkers:          workers,
+		SttProviders:           sttProviders,
+		DefaultSttProvider:     *defaultSttProvider,
+		SttAudioNormalizer:     encoder,
+		SttRunGate:             gpuRunGate(gpuLifecycle),
+		WebDir:                 *webDir,
+		AudioStore:             audioStore,
+		AlignProvider:          alignProvider,
+		AnalysisJobs:           analysisJobs,
+		AnalysisMaxUploadBytes: int64(*analysisMaxUploadMiB) << 20,
 	})
 	if err != nil {
 		log.Fatalf("audio server: %v", err)

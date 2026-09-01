@@ -21,6 +21,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/dleiferives/audio-server/internal/analysisjob"
 	"github.com/dleiferives/audio-server/internal/apidocs"
 	"github.com/dleiferives/audio-server/internal/provider"
 	"github.com/dleiferives/audio-server/internal/queue"
@@ -30,9 +31,10 @@ import (
 )
 
 const (
-	defaultMaxInputChars  = 5000
-	defaultRequestTimeout = 30 * time.Second
-	defaultMaxUploadBytes = 25 << 20 // 25MB, matching OpenAI's transcription upload limit
+	defaultMaxInputChars                = 5000
+	defaultRequestTimeout               = 30 * time.Second
+	defaultMaxUploadBytes               = 25 << 20 // 25MB, matching OpenAI's transcription upload limit
+	defaultAnalysisMaxUploadBytes int64 = 2 << 30
 )
 
 type Config struct {
@@ -72,6 +74,10 @@ type Config struct {
 	// AlignProvider handles forced alignment via MFA subprocess.
 	// Nil when alignment is disabled.
 	AlignProvider Aligner
+
+	// AnalysisJobs runs asynchronous diarization and speaker-embedding work.
+	AnalysisJobs           *analysisjob.Manager
+	AnalysisMaxUploadBytes int64
 }
 
 // Aligner wraps the MFA-go alignment provider.
@@ -90,15 +96,17 @@ type Server struct {
 	queue           *queue.Manager
 	streamSem       map[string]chan struct{}
 
-	sttProviders       map[string]sttprovider.Provider
-	defaultSttProvider string
-	maxUploadBytes     int
-	sttAudioNormalizer sttprovider.AudioNormalizer
-	sttRunGate         func(string) (func(), error)
-	sttJobs            *sttjob.Manager
-	webDir             string
-	audioStore         *store.Store
-	alignProvider      Aligner
+	sttProviders           map[string]sttprovider.Provider
+	defaultSttProvider     string
+	maxUploadBytes         int
+	sttAudioNormalizer     sttprovider.AudioNormalizer
+	sttRunGate             func(string) (func(), error)
+	sttJobs                *sttjob.Manager
+	webDir                 string
+	audioStore             *store.Store
+	alignProvider          Aligner
+	analysisJobs           *analysisjob.Manager
+	analysisMaxUploadBytes int64
 }
 
 func New(cfg Config) (*Server, error) {
@@ -131,6 +139,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.MaxUploadBytes <= 0 {
 		cfg.MaxUploadBytes = defaultMaxUploadBytes
+	}
+	if cfg.AnalysisMaxUploadBytes <= 0 {
+		cfg.AnalysisMaxUploadBytes = defaultAnalysisMaxUploadBytes
 	}
 	streamSem := make(map[string]chan struct{}, len(providers))
 	for id := range providers {
@@ -178,9 +189,11 @@ func New(cfg Config) (*Server, error) {
 		sttJobs: sttjob.New(sttjob.Config{
 			Providers: sttProviders, RunGate: cfg.SttRunGate, Timeout: cfg.RequestTimeout,
 		}),
-		webDir:        cfg.WebDir,
-		audioStore:    cfg.AudioStore,
-		alignProvider: cfg.AlignProvider,
+		webDir:                 cfg.WebDir,
+		audioStore:             cfg.AudioStore,
+		alignProvider:          cfg.AlignProvider,
+		analysisJobs:           cfg.AnalysisJobs,
+		analysisMaxUploadBytes: cfg.AnalysisMaxUploadBytes,
 	}, nil
 }
 
@@ -200,6 +213,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/audio/transcriptions", s.auth(s.transcriptions))
 	mux.HandleFunc("GET /v1/audio/transcriptions/stream", s.auth(s.liveTranscription))
 	mux.HandleFunc("GET /v1/audio/transcription-jobs/{id}", s.auth(s.getTranscriptionJob))
+	mux.HandleFunc("POST /v1/audio/analysis-jobs", s.auth(s.createAnalysisJob))
+	mux.HandleFunc("GET /v1/audio/analysis-jobs/{id}", s.auth(s.getAnalysisJob))
+	mux.HandleFunc("GET /v1/audio/analysis-jobs/{id}/result", s.auth(s.getAnalysisResult))
 	if s.alignProvider != nil {
 		mux.HandleFunc("POST /v1/audio/alignments", s.auth(s.createAlignJob))
 		mux.HandleFunc("GET /v1/audio/alignments/{id}", s.auth(s.getAlignJob))
@@ -211,6 +227,130 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("GET /", fs)
 	}
 	return mux
+}
+
+func (s *Server) createAnalysisJob(w http.ResponseWriter, r *http.Request) {
+	if s.analysisJobs == nil || !s.analysisJobs.Enabled() {
+		writeError(w, http.StatusServiceUnavailable, errors.New("audio analysis is not configured"))
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, s.analysisMaxUploadBytes)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("file is required"))
+		return
+	}
+	defer file.Close()
+	audio, err := io.ReadAll(file)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	includeEmbeddings := true
+	switch strings.ToLower(strings.TrimSpace(r.FormValue("include_speaker_embeddings"))) {
+	case "", "true", "1":
+	case "false", "0":
+		includeEmbeddings = false
+	default:
+		writeError(w, http.StatusBadRequest, errors.New("include_speaker_embeddings must be true or false"))
+		return
+	}
+	transcribe := true
+	switch strings.ToLower(strings.TrimSpace(r.FormValue("transcribe"))) {
+	case "", "true", "1":
+	case "false", "0":
+		transcribe = false
+	default:
+		writeError(w, http.StatusBadRequest, errors.New("transcribe must be true or false"))
+		return
+	}
+	separateDialogue := false
+	switch strings.ToLower(strings.TrimSpace(r.FormValue("separate_dialogue"))) {
+	case "", "false", "0":
+	case "true", "1":
+		separateDialogue = true
+	default:
+		writeError(w, http.StatusBadRequest, errors.New("separate_dialogue must be true or false"))
+		return
+	}
+	if s.sttAudioNormalizer == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("audio normalization is not configured"))
+		return
+	}
+	job, err := s.analysisJobs.Submit(analysisjob.Request{
+		Audio: audio, Filename: header.Filename,
+		IncludeSpeakerEmbeddings: includeEmbeddings,
+		Transcribe:               transcribe, TranscriptionModel: r.FormValue("transcription_model"), Language: r.FormValue("language"),
+		SeparateDialogue: separateDialogue,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.Header().Set("Location", "/v1/audio/analysis-jobs/"+job.ID)
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"id": job.ID, "status": job.Status,
+		"status_url": "/v1/audio/analysis-jobs/" + job.ID,
+		"result_url": "/v1/audio/analysis-jobs/" + job.ID + "/result",
+	})
+}
+
+func (s *Server) getAnalysisJob(w http.ResponseWriter, r *http.Request) {
+	if s.analysisJobs == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("audio analysis is not configured"))
+		return
+	}
+	job, err := s.analysisJobs.Get(r.PathValue("id"))
+	if errors.Is(err, analysisjob.ErrNotFound) {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	body := map[string]any{
+		"id": job.ID, "status": job.Status, "created_at": job.CreatedAt,
+		"result_url": "/v1/audio/analysis-jobs/" + job.ID + "/result",
+	}
+	if !job.StartedAt.IsZero() {
+		body["started_at"] = job.StartedAt
+	}
+	if !job.FinishedAt.IsZero() {
+		body["finished_at"] = job.FinishedAt
+	}
+	if job.Err != nil {
+		body["error"] = map[string]string{"message": job.Err.Error()}
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+func (s *Server) getAnalysisResult(w http.ResponseWriter, r *http.Request) {
+	if s.analysisJobs == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("audio analysis is not configured"))
+		return
+	}
+	job, err := s.analysisJobs.Get(r.PathValue("id"))
+	if errors.Is(err, analysisjob.ErrNotFound) {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	switch job.Status {
+	case analysisjob.StatusSucceeded:
+		writeJSON(w, http.StatusOK, job.Result)
+	case analysisjob.StatusFailed:
+		writeError(w, http.StatusUnprocessableEntity, job.Err)
+	default:
+		writeJSON(w, http.StatusAccepted, map[string]any{"id": job.ID, "status": job.Status})
+	}
 }
 
 var liveSTTUpgrader = websocket.Upgrader{
@@ -565,10 +705,30 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 			"provider": id, "live_streaming": ok && live.SupportsLiveStreaming(),
 		})
 	}
+	analysisCapabilities := []map[string]any{}
+	if s.analysisJobs != nil && s.analysisJobs.Enabled() {
+		analysisCapabilities = append(analysisCapabilities, map[string]any{
+			"provider": s.analysisJobs.DiarizerID(), "tasks": []string{"diarization", "overlap_detection"},
+			"streaming": false, "max_speakers": 4,
+		})
+		if id := s.analysisJobs.EmbedderID(); id != "" {
+			analysisCapabilities = append(analysisCapabilities, map[string]any{
+				"provider": id, "tasks": []string{"speaker_embedding", "speaker_verification"},
+				"streaming": false,
+			})
+		}
+		if id := s.analysisJobs.SeparatorID(); id != "" {
+			analysisCapabilities = append(analysisCapabilities, map[string]any{
+				"provider": id, "tasks": []string{"dialogue_separation", "music_separation"},
+				"streaming": false,
+			})
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"languages":     languages,
-		"providers":     providers,
-		"stt_providers": sttCapabilities,
+		"languages":          languages,
+		"providers":          providers,
+		"stt_providers":      sttCapabilities,
+		"analysis_providers": analysisCapabilities,
 	})
 }
 
