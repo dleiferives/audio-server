@@ -44,6 +44,85 @@ func TestSpeechReturnsProviderAudio(t *testing.T) {
 	}
 }
 
+func TestCreateAlignmentBatchQueuesOneCorpus(t *testing.T) {
+	aligner := &fakeBatchAligner{}
+	s := newTestServer(t, fakeProvider{}, Config{AlignProvider: aligner})
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	manifest := `{"language":"el","items":[{"id":"sentence-0","transcript":"Γεια σου"},{"id":"sentence-1","transcript":"Τι κάνεις"}]}`
+	if err := writer.WriteField("manifest", manifest); err != nil {
+		t.Fatal(err)
+	}
+	for _, audio := range []string{"first-mp3", "second-mp3"} {
+		part, err := writer.CreateFormFile("file", "sentence.mp3")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := part.Write([]byte(audio)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/audio/alignments/batch", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var job struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &job); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := s.queue.Wait(ctx, job.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	resultResp := request(t, s, http.MethodGet, "/v1/audio/alignments/"+job.ID+"/result", "", "")
+	defer resultResp.Body.Close()
+	if resultResp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resultResp.Body)
+		t.Fatalf("result status = %d, body = %s", resultResp.StatusCode, data)
+	}
+	if strings.Join(aligner.ids, ",") != "sentence-0,sentence-1" ||
+		strings.Join(aligner.transcripts, ",") != "Γεια σου,Τι κάνεις" || aligner.language != "el" ||
+		string(aligner.audio[0]) != "first-mp3" || string(aligner.audio[1]) != "second-mp3" {
+		t.Fatalf("unexpected batch input: ids=%v transcripts=%v language=%q audio=%q", aligner.ids, aligner.transcripts, aligner.language, aligner.audio)
+	}
+}
+
+type fakeBatchAligner struct {
+	audio       [][]byte
+	transcripts []string
+	ids         []string
+	language    string
+}
+
+func (f *fakeBatchAligner) Align(context.Context, []byte, string, string) (any, error) {
+	return map[string]any{"words": []any{}}, nil
+}
+
+func (f *fakeBatchAligner) AlignBatch(_ context.Context, audio [][]byte, transcripts, ids []string, language string) (any, error) {
+	f.audio = audio
+	f.transcripts = transcripts
+	f.ids = ids
+	f.language = language
+	return map[string]any{"items": []any{
+		map[string]any{"id": ids[0], "alignment": map[string]any{"words": []any{}}},
+		map[string]any{"id": ids[1], "alignment": map[string]any{"words": []any{}}},
+	}}, nil
+}
+
+func (f *fakeBatchAligner) Languages() []string              { return []string{"el"} }
+func (f *fakeBatchAligner) HasLanguage(language string) bool { return language == "el" }
+
 func TestSpeechValidatesVoiceAgainstLanguage(t *testing.T) {
 	var synthesized bool
 	s := newTestServer(t, fakeProvider{

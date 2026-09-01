@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -87,6 +88,10 @@ type Aligner interface {
 	HasLanguage(language string) bool
 }
 
+type batchAligner interface {
+	AlignBatch(ctx context.Context, audio [][]byte, transcripts, ids []string, language string) (any, error)
+}
+
 type Server struct {
 	providers       map[string]provider.Provider
 	defaultProvider string
@@ -105,6 +110,7 @@ type Server struct {
 	webDir                 string
 	audioStore             *store.Store
 	alignProvider          Aligner
+	alignMu                sync.Mutex
 	analysisJobs           *analysisjob.Manager
 	analysisMaxUploadBytes int64
 }
@@ -218,6 +224,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/audio/analysis-jobs/{id}/result", s.auth(s.getAnalysisResult))
 	if s.alignProvider != nil {
 		mux.HandleFunc("POST /v1/audio/alignments", s.auth(s.createAlignJob))
+		mux.HandleFunc("POST /v1/audio/alignments/batch", s.auth(s.createAlignBatchJob))
 		mux.HandleFunc("GET /v1/audio/alignments/{id}", s.auth(s.getAlignJob))
 		mux.HandleFunc("GET /v1/audio/alignments/{id}/result", s.auth(s.getAlignResult))
 		mux.HandleFunc("GET /v1/audio/alignments/models", s.auth(s.listAlignLanguages))
@@ -1671,19 +1678,105 @@ func (s *Server) createAlignJob(w http.ResponseWriter, r *http.Request) {
 
 	job := s.queue.NewRunningJob("align", provider.SpeechRequest{Input: transcript})
 	go func() {
+		s.alignMu.Lock()
+		defer s.alignMu.Unlock()
 		result, err := s.alignProvider.Align(context.Background(), audio, transcript, language)
 		if err != nil {
 			s.queue.FailJob(job.ID, err)
 			return
+		}
+		if result != nil {
+			s.queue.SetAlignResult(job.ID, result)
 		}
 		s.queue.CompleteJob(job.ID, provider.SpeechResult{
 			Model:      "align/" + language,
 			ProviderID: "align",
 			Voice:      language,
 		})
-		if result != nil {
-			s.queue.SetAlignResult(job.ID, result)
+	}()
+	writeJSON(w, http.StatusAccepted, s.jobStatusBody(job.ID))
+}
+
+type alignmentBatchManifest struct {
+	Language string                       `json:"language"`
+	Items    []alignmentBatchManifestItem `json:"items"`
+}
+
+type alignmentBatchManifestItem struct {
+	ID         string `json:"id"`
+	Transcript string `json:"transcript"`
+}
+
+func (s *Server) createAlignBatchJob(w http.ResponseWriter, r *http.Request) {
+	aligner, ok := s.alignProvider.(batchAligner)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, errors.New("batch alignment is not configured"))
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, int64(s.maxUploadBytes))
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	defer r.MultipartForm.RemoveAll()
+	var manifest alignmentBatchManifest
+	if err := json.Unmarshal([]byte(r.FormValue("manifest")), &manifest); err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("valid alignment manifest is required"))
+		return
+	}
+	if !s.alignProvider.HasLanguage(manifest.Language) {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("unsupported language: %s", manifest.Language))
+		return
+	}
+	files := r.MultipartForm.File["file"]
+	if len(manifest.Items) == 0 || len(files) != len(manifest.Items) {
+		writeError(w, http.StatusBadRequest, errors.New("manifest items and audio files must have the same non-zero length"))
+		return
+	}
+	audio := make([][]byte, len(files))
+	transcripts := make([]string, len(files))
+	ids := make([]string, len(files))
+	seen := make(map[string]struct{}, len(files))
+	for i, item := range manifest.Items {
+		item.ID = strings.TrimSpace(item.ID)
+		item.Transcript = strings.TrimSpace(item.Transcript)
+		if item.ID == "" || item.Transcript == "" {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("manifest item %d requires id and transcript", i))
+			return
 		}
+		if _, exists := seen[item.ID]; exists {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("duplicate alignment id %q", item.ID))
+			return
+		}
+		seen[item.ID] = struct{}{}
+		file, err := files[i].Open()
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		audio[i], err = io.ReadAll(file)
+		_ = file.Close()
+		if err != nil || len(audio[i]) == 0 {
+			writeError(w, http.StatusBadRequest, errors.New("alignment audio file is empty or unreadable"))
+			return
+		}
+		ids[i] = item.ID
+		transcripts[i] = item.Transcript
+	}
+
+	job := s.queue.NewRunningJob("align-batch", provider.SpeechRequest{Input: fmt.Sprintf("%d items", len(ids))})
+	go func() {
+		s.alignMu.Lock()
+		defer s.alignMu.Unlock()
+		result, err := aligner.AlignBatch(context.Background(), audio, transcripts, ids, manifest.Language)
+		if err != nil {
+			s.queue.FailJob(job.ID, err)
+			return
+		}
+		s.queue.SetAlignResult(job.ID, result)
+		s.queue.CompleteJob(job.ID, provider.SpeechResult{
+			Model: "align-batch/" + manifest.Language, ProviderID: "align-batch", Voice: manifest.Language,
+		})
 	}()
 	writeJSON(w, http.StatusAccepted, s.jobStatusBody(job.ID))
 }
