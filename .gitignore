@@ -5,6 +5,7 @@ __pycache__/
 /models/
 /.built-audiocpp
 /.built-transcribecpp
+/.built-wespeaker
 /audio.cpp/build/
 /audio-output/
 /mfa/work/
