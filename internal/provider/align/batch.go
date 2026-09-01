@@ -99,7 +99,7 @@ func (p *Provider) AlignBatch(ctx context.Context, audio [][]byte, transcripts, 
 		"align", corpusDir, model.Dictionary, model.Acoustic, outputDir,
 		"--output_format", "json",
 		"--single_speaker",
-		"--no_use_mp",
+		"--use_mp",
 		"--clean",
 		fmt.Sprintf("--temporary_directory=%s", filepath.Join(tmpDir, "mfa-tmp")),
 	}
