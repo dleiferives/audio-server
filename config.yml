@@ -17,8 +17,8 @@ mp3_bitrate: "48k"
 ffmpeg_path: "ffmpeg"
 
 # ── GPU providers (audio.cpp) ──
-omnivoice_enabled: true
-omnivoice_addr: "http://127.0.0.1:8020"
+omnivoice_enabled: false
+omnivoice_addr: ""
 omnivoice_concurrency: 1
 supertonic_addr: "http://127.0.0.1:8022"
 audiocpp_bin: "audio.cpp/build/linux-cuda-release/bin/audiocpp_server"
@@ -38,18 +38,18 @@ model_vram_mib:                # conservative residency estimates; tune per GPU/
   bs-roformer: 2048
 
 # ── STT ──
-stt_enabled: true
-default_stt_provider: "cohere-transcribe"
-parakeet_enabled: true
-parakeet_addr: "http://127.0.0.1:8026"
-nemotron_addr: "http://127.0.0.1:8024"
-qwen3_asr_0_6b_enabled: true
+stt_enabled: false
+default_stt_provider: ""
+parakeet_enabled: false
+parakeet_addr: ""
+nemotron_addr: ""
+qwen3_asr_0_6b_enabled: false
 qwen3_asr_0_6b_addr: "http://127.0.0.1:8027"
-qwen3_asr_1_7b_enabled: true
+qwen3_asr_1_7b_enabled: false
 qwen3_asr_1_7b_addr: "http://127.0.0.1:8028"
 
 # transcribe.cpp accepts many GGUF ASR families; Cohere Q8 is our first model.
-transcribecpp_enabled: true
+transcribecpp_enabled: false
 transcribecpp_provider_id: "cohere-transcribe"
 transcribecpp_addr: "http://127.0.0.1:8031"
 transcribecpp_bin: "bin/transcribecpp_server"
@@ -59,7 +59,7 @@ transcribecpp_backend: "cuda"
 transcribecpp_threads: 0
 
 # True incremental STT; use the WebSocket endpoint for live PCM audio.
-voxtral_realtime_enabled: true
+voxtral_realtime_enabled: false
 voxtral_realtime_addr: "http://127.0.0.1:8032"
 voxtral_realtime_port: 8032
 voxtral_realtime_model: "models/Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf"
@@ -67,20 +67,20 @@ voxtral_realtime_backend: "cuda"
 voxtral_realtime_threads: 0
 
 # ── autodubbing analysis ──
-analysis_enabled: true
+analysis_enabled: false
 analysis_max_upload_mib: 2048
-sortformer_addr: "http://127.0.0.1:8033"
+sortformer_addr: ""
 sortformer_port: 8033
-bs_roformer_addr: "http://127.0.0.1:8035"
+bs_roformer_addr: ""
 bs_roformer_port: 8035
-wespeaker_enabled: true
+wespeaker_enabled: false
 wespeaker_addr: "http://127.0.0.1:8034"
 wespeaker_port: 8034
 wespeaker_bin: "bin/wespeaker_server"
 wespeaker_model: "models/wespeaker/voxceleb_gemini_dfresnet114_LM.onnx"
 
 # ── alignment (MFA) ──
-align_enabled: true
+align_enabled: false
 align_mfa_env: "mfa/env"
 align_mfa_work_dir: "mfa/work"
 align_mfa_models_config: "mfa/models.yaml"
@@ -89,7 +89,7 @@ align_mfa_models_config: "mfa/models.yaml"
 kokoro_enabled: false
 
 # ── faster-whisper (shared GPU lifecycle) ──
-faster_whisper_enabled: true
+faster_whisper_enabled: false
 faster_whisper_addr: "http://127.0.0.1:8030"
 faster_whisper_python: "/home/dleiferives/.pyenv/versions/audio-server/bin/python"
 faster_whisper_script: "stt/fasterwhisper/server.py"

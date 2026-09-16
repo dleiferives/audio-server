@@ -10,7 +10,7 @@
     {
       "id": "supertonic",
       "family": "supertonic",
-      "path": "../models/Supertonic-3-GGUF/supertonic-3-q8_0.gguf",
+      "path": "../models/Supertonic-3-safetensors",
       "task": "tts",
       "mode": "streaming",
       "default_voice_preset": {
