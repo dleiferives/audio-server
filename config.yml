@@ -21,9 +21,17 @@ omnivoice_enabled: true
 omnivoice_addr: "http://127.0.0.1:8020"
 omnivoice_concurrency: 1
 supertonic_addr: "http://127.0.0.1:8022"
+
+# OmniVoice peak VRAM grows with input length, so long input is segmented into
+# chunks. supertonic has no such limit and is deliberately left unsegmented.
+# Unset (or 0) disables segmentation entirely.
+omnivoice_max_words: 64        # hard cap per chunk
+omnivoice_target_words: 32     # preferred chunk size, usually 1-3 sentences
+segment_python: "/home/dleiferives/.pyenv/versions/audio-server/bin/python"
+segment_script: "tts/segment/segment.py"
 audiocpp_bin: "audio.cpp/build/linux-cuda-release/bin/audiocpp_server"
 audiocpp_idle_unload_seconds: 0  # keep resident until budget eviction; positive = idle timeout
-max_vram_mib: 3500             # GTX 1650 reports 3715 MiB usable; leave headroom for the display
+max_vram_mib: 2048             # below supertonic+omnivoice combined, so only one model is ever resident
 model_vram_mib:                # conservative residency estimates; tune per GPU/build
   supertonic: 768
   omnivoice: 1600

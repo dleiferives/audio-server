@@ -35,6 +35,7 @@ import (
 	"github.com/dleiferives/audio-server/internal/provider/transcribecpp"
 	"github.com/dleiferives/audio-server/internal/provider/wespeaker"
 	"github.com/dleiferives/audio-server/internal/queue"
+	"github.com/dleiferives/audio-server/internal/segment"
 	"github.com/dleiferives/audio-server/internal/server"
 	"github.com/dleiferives/audio-server/internal/store"
 	"github.com/dleiferives/audio-server/internal/sttprovider"
@@ -58,6 +59,10 @@ type configFile struct {
 	OmnivoiceEnabled          bool           `yaml:"omnivoice_enabled"`
 	OmnivoiceAddr             string         `yaml:"omnivoice_addr"`
 	OmnivoiceConcurrency      int            `yaml:"omnivoice_concurrency"`
+	OmnivoiceMaxWords         int            `yaml:"omnivoice_max_words"`
+	OmnivoiceTargetWords      int            `yaml:"omnivoice_target_words"`
+	SegmentPython             string         `yaml:"segment_python"`
+	SegmentScript             string         `yaml:"segment_script"`
 	SupertonicAddr            string         `yaml:"supertonic_addr"`
 	AudiocppBin               string         `yaml:"audiocpp_bin"`
 	AudiocppIdleUnloadSeconds int            `yaml:"audiocpp_idle_unload_seconds"`
@@ -139,6 +144,10 @@ func main() {
 	defaultVoice := flag.String("espeak-default-voice", env("AUDIO_ESPEAK_DEFAULT_VOICE", cfg.EspeakDefaultVoice), "default eSpeak voice")
 	omnivoiceAddr := flag.String("omnivoice-addr", env("AUDIO_OMNIVOICE_ADDR", cfg.OmnivoiceAddr), "OmniVoice sidecar base URL (e.g. http://127.0.0.1:8020); disabled when blank")
 	omnivoiceConcurrency := flag.Int("omnivoice-concurrency", envInt("AUDIO_OMNIVOICE_CONCURRENCY", cfg.OmnivoiceConcurrency), "concurrent OmniVoice workers")
+	omnivoiceMaxWords := flag.Int("omnivoice-max-words", cfg.OmnivoiceMaxWords, "hard cap on words per OmniVoice synthesis chunk; 0 disables auto-segmentation")
+	omnivoiceTargetWords := flag.Int("omnivoice-target-words", cfg.OmnivoiceTargetWords, "preferred words per OmniVoice chunk; 0 means half of -omnivoice-max-words")
+	segmentPython := flag.String("segment-python", env("AUDIO_SEGMENT_PYTHON", valueOr(cfg.SegmentPython, "python3")), "python interpreter for the sentence segmenter")
+	segmentScript := flag.String("segment-script", valueOr(cfg.SegmentScript, "tts/segment/segment.py"), "path to the sentence segmenter script")
 	supertonicAddr := flag.String("supertonic-addr", env("AUDIO_SUPERTONIC_ADDR", cfg.SupertonicAddr), "Supertonic sidecar base URL (e.g. http://127.0.0.1:8022); disabled when blank")
 	audiocppBin := flag.String("audiocpp-bin", env("AUDIO_AUDIOCPP_BIN", cfg.AudiocppBin), "path to audiocpp_server binary")
 	audiocppIdle := flag.Int("audiocpp-idle-unload-seconds", envInt("AUDIO_AUDIOCPP_IDLE_UNLOAD", cfg.AudiocppIdleUnloadSeconds), "seconds before unloading idle audiocpp_server instances")
@@ -298,6 +307,12 @@ func main() {
 
 	if strings.TrimSpace(*omnivoiceAddr) != "" {
 		ov := omnivoice.New(*omnivoiceAddr, nil, encoder)
+		if *omnivoiceMaxWords > 0 {
+			ov.Segmenter = segment.Python{Bin: *segmentPython, Script: *segmentScript}
+			ov.MaxWords = *omnivoiceMaxWords
+			ov.TargetWords = *omnivoiceTargetWords
+			log.Printf("omnivoice: auto-segmentation on (max %d words, target %d)", ov.MaxWords, ov.TargetWords)
+		}
 		if gpuLifecycle != nil {
 			ov.StartFunc = func() error { return gpuLifecycle.Start("omnivoice", false) }
 		}
