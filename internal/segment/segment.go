@@ -131,3 +131,37 @@ func Pack(sentences []string, targetWords, maxWords int) []string {
 func WordCount(text string) int {
 	return len(strings.Fields(text))
 }
+
+// sentenceTerminators are the marks audio.cpp's endline splitter recognises as
+// the end of a sentence. It only cuts when one is the last character on a line.
+const sentenceTerminators = ".!?。！？"
+
+// EndsSentence reports whether text ends with a mark the endline splitter will
+// cut on. A trailing quote or bracket hides the terminator from it, so those
+// count as not ending a sentence.
+func EndsSentence(text string) bool {
+	trimmed := strings.TrimRight(text, " \t\r\n")
+	if trimmed == "" {
+		return false
+	}
+	return strings.ContainsAny(trimmed[len(trimmed)-len(lastRune(trimmed)):], sentenceTerminators)
+}
+
+func lastRune(s string) string {
+	runes := []rune(s)
+	return string(runes[len(runes)-1])
+}
+
+// Terminate appends a period to text when it does not already end in a mark the
+// endline splitter cuts on.
+//
+// Without this, a chunk that carries no terminal punctuation — a hard-split
+// oversized sentence, or input with no punctuation at all — is not cut where we
+// asked, and the whole request falls back to being split on a codepoint grid
+// that ignores the word cap.
+func Terminate(text string) string {
+	if EndsSentence(text) {
+		return text
+	}
+	return strings.TrimRight(text, " \t\r\n") + "."
+}

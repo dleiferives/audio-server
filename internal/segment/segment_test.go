@@ -70,3 +70,20 @@ func TestPackTargetAboveMaxClampsToMax(t *testing.T) {
 		}
 	}
 }
+
+func TestTerminateAddsMissingSentenceMark(t *testing.T) {
+	cases := map[string]string{
+		"already done.": "already done.",
+		"shouting!":     "shouting!",
+		"asking?":       "asking?",
+		"no mark here":  "no mark here.",
+		"trailing bit ": "trailing bit.",
+		`he said "hi."`: `he said "hi.".`, // closing quote hides the mark
+		"句号。":           "句号。",
+	}
+	for in, want := range cases {
+		if got := Terminate(in); got != want {
+			t.Errorf("Terminate(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

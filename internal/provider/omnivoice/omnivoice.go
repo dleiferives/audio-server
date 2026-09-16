@@ -260,9 +260,16 @@ func (p Provider) autoSegment(ctx context.Context, input, language string, optio
 	}
 
 	options["text_chunk_mode"] = "endline"
-	// Codepoint budget acts as a backstop for a chunk that carries no
-	// terminal punctuation for the endline splitter to find.
-	options["text_chunk_size"] = p.MaxWords * 8
+	// The splitter only cuts where a line ends in terminal punctuation, so
+	// guarantee every chunk carries one. Without this a hard-split or
+	// unpunctuated chunk is not cut where we asked and the request falls back
+	// to a codepoint grid that ignores the word cap.
+	for i := range chunks {
+		chunks[i] = segment.Terminate(chunks[i])
+	}
+	// Backstop budget, sized to the word cap rather than generously: it only
+	// applies if a chunk still slips past the endline cut.
+	options["text_chunk_size"] = p.MaxWords * 6
 	return strings.Join(chunks, "\n")
 }
 
