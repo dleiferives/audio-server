@@ -17,16 +17,16 @@ mp3_bitrate: "48k"
 ffmpeg_path: "ffmpeg"
 
 # ── GPU providers (audio.cpp) ──
-omnivoice_enabled: false
-omnivoice_addr: ""
+omnivoice_enabled: true
+omnivoice_addr: "http://127.0.0.1:8020"
 omnivoice_concurrency: 1
 supertonic_addr: "http://127.0.0.1:8022"
 audiocpp_bin: "audio.cpp/build/linux-cuda-release/bin/audiocpp_server"
 audiocpp_idle_unload_seconds: 0  # keep resident until budget eviction; positive = idle timeout
-max_vram_mib: auto             # auto = total VRAM reported by nvidia-smi
+max_vram_mib: 3500             # GTX 1650 reports 3715 MiB usable; leave headroom for the display
 model_vram_mib:                # conservative residency estimates; tune per GPU/build
-  supertonic: 1024
-  omnivoice: 2048
+  supertonic: 768
+  omnivoice: 3300
   parakeet: 1280
   nemotron: 1280
   qwen3-asr-0.6b: 1792
