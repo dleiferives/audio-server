@@ -80,7 +80,7 @@ wespeaker_bin: "bin/wespeaker_server"
 wespeaker_model: "models/wespeaker/voxceleb_gemini_dfresnet114_LM.onnx"
 
 # ── alignment (MFA) ──
-align_enabled: false
+align_enabled: true
 align_mfa_env: "mfa/env"
 align_mfa_work_dir: "mfa/work"
 align_mfa_models_config: "mfa/models.yaml"
