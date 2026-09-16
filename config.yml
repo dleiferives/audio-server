@@ -26,7 +26,7 @@ audiocpp_idle_unload_seconds: 0  # keep resident until budget eviction; positive
 max_vram_mib: 3500             # GTX 1650 reports 3715 MiB usable; leave headroom for the display
 model_vram_mib:                # conservative residency estimates; tune per GPU/build
   supertonic: 768
-  omnivoice: 3300
+  omnivoice: 1600
   parakeet: 1280
   nemotron: 1280
   qwen3-asr-0.6b: 1792

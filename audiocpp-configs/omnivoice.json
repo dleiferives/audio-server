@@ -10,7 +10,7 @@
     {
       "id": "omnivoice",
       "family": "omnivoice",
-      "path": "../models/OmniVoice",
+      "path": "../models/OmniVoice-GGUF/omnivoice-q8_0.gguf",
       "task": "tts",
       "mode": "streaming"
     }
