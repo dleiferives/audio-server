@@ -44,13 +44,16 @@ SORTFORMER_MODEL_SHA256 := 4fa6a3e30c4a1c6cc1da455268806edc93432ca1e1b5b6923e942
 BS_ROFORMER_MODEL := models/BS-RoFormer-ep368_Q8/BS-RoFormer-ep368_Q8.gguf
 BS_ROFORMER_MODEL_URL := https://huggingface.co/mirek190/audio.cpp/resolve/main/vocal%20separation%20models/BS-RoFormer-ep368_Q8.gguf
 BS_ROFORMER_MODEL_SHA256 := 9a55a8cad369d00f6e0fb208bb0cd87e30e25430772b8491e20a4eace6423ad2
+OMNIVOICE_MODEL := models/OmniVoice-GGUF/omnivoice-q8_0.gguf
+OMNIVOICE_MODEL_URL := https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/OmniVoice-GGUF/omnivoice-q8_0.gguf
+OMNIVOICE_MODEL_SHA256 := 2f4be637278043c6842de5b85d681532030e9eb6ffe0f8b0e320f68238e3da8b
 COHERE_MODEL := models/cohere-transcribe-03-2026-Q8_0.gguf
 COHERE_MODEL_URL := https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf/resolve/main/cohere-transcribe-03-2026-Q8_0.gguf
 VOXTRAL_MODEL := models/Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf
 VOXTRAL_MODEL_URL := https://huggingface.co/handy-computer/Voxtral-Mini-4B-Realtime-2602-gguf/resolve/main/Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf
 CUDA_HOME ?= /usr/local/cuda
 
-.PHONY: build build-audiocpp build-transcribecpp build-wespeaker download-cohere download-voxtral download-wespeaker download-sortformer download-bs-roformer run stop clean
+.PHONY: build build-audiocpp build-transcribecpp build-wespeaker download-cohere download-omnivoice download-voxtral download-wespeaker download-sortformer download-bs-roformer run stop clean
 
 build:
 	@echo "  → building $(BIN)"
@@ -73,6 +76,8 @@ download-wespeaker: $(WESPEAKER_MODEL)
 download-sortformer: $(SORTFORMER_MODEL)
 
 download-bs-roformer: $(BS_ROFORMER_MODEL)
+
+download-omnivoice: $(OMNIVOICE_MODEL)
 
 $(AUDIOCPP_SENTINEL):
 	@echo "  → building audiocpp_server (one-time, ~5-10 min)..."
@@ -166,6 +171,13 @@ $(SORTFORMER_MODEL):
 	@echo "  → downloading Sortformer diarization Q8 model (~168 MB)..."
 	curl --fail --location --continue-at - --output "$@" "$(SORTFORMER_MODEL_URL)"
 	@echo "$(SORTFORMER_MODEL_SHA256)  $@" | sha256sum --check --strict
+	@echo "  → downloaded $@"
+
+$(OMNIVOICE_MODEL):
+	@mkdir -p models/OmniVoice-GGUF
+	@echo "  → downloading OmniVoice Q8 model (~1.3 GB)..."
+	curl --fail --location --continue-at - --output "$@" "$(OMNIVOICE_MODEL_URL)"
+	@echo "$(OMNIVOICE_MODEL_SHA256)  $@" | sha256sum --check --strict
 	@echo "  → downloaded $@"
 
 $(BS_ROFORMER_MODEL):
