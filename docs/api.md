@@ -401,6 +401,53 @@ Returns `202` until ready, then speaker-attributed timeline segments, raw
 diarization turns, optional captions, and optional speaker embeddings. See
 [Autodubbing analysis](autodubbing.md) for a complete example and limitations.
 
+## Forced alignment
+
+Word- and phone-level timings for audio you already have a transcript for.
+Alignment runs Montreal Forced Aligner out of process and is asynchronous: the
+`POST` returns `202` with a job ID, then you poll.
+
+### `GET /v1/audio/alignments/models`
+
+Lists the language codes that `mfa/models.yaml` maps to an acoustic model and
+dictionary. A code appearing here does not guarantee the underlying MFA models
+are downloaded — an aligner whose models are missing fails at job time.
+
+### `POST /v1/audio/alignments`
+
+```bash
+ID=$(curl -sS http://127.0.0.1:8010/v1/audio/alignments \
+  -F file=@speech.wav \
+  -F 'transcript=forced alignment is working for english now' \
+  -F language=en | jq -r .id)
+```
+
+**Form fields**
+
+| Field | Required | Description |
+|---|---|---|
+| `file` | yes | Audio file. Converted to 16 kHz mono WAV before alignment. |
+| `transcript` | yes | Plain-text transcript of the whole clip. |
+| `language` | yes | A code returned by `/v1/audio/alignments/models`. |
+
+### `GET /v1/audio/alignments/{id}`
+
+Returns `queued`, `running`, `succeeded`, or `failed`. On success the `result`
+holds `words` and `phones`, each with `start`/`end` seconds:
+
+```json
+{
+  "status": "succeeded",
+  "result": {
+    "words": [ { "start": 0.32, "end": 0.70, "text": "forced" } ],
+    "phones": [ { "start": 0.32, "end": 0.38, "phone": "f" } ]
+  }
+}
+```
+
+Alignment is CPU-bound and not fast: expect roughly ten seconds of wall clock
+per second of audio on a cold model.
+
 ## Authentication
 
 When `AUDIO_API_KEY` is set, all `/v1/` endpoints require one of:

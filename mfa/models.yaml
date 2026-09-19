@@ -9,7 +9,7 @@ models:
     g2p: mfa/models/greek_cv_g2p.zip
   en:
     acoustic: english_mfa
-    dictionary: english_us_arpa
+    dictionary: english_us_mfa
   fr:
     acoustic: french_mfa
     dictionary: french_mfa

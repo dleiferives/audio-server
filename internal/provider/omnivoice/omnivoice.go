@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
 
 	"github.com/dleiferives/audio-server/internal/provider"
+	"github.com/dleiferives/audio-server/internal/segment"
 )
 
 const (
@@ -41,6 +43,15 @@ type Provider struct {
 	Encoder             Encoder
 	ReferenceNormalizer ReferenceNormalizer
 	StartFunc           func() error
+
+	// Segmenter finds sentence boundaries for auto-segmentation. Nil disables
+	// segmentation regardless of MaxWords.
+	Segmenter segment.Segmenter
+	// MaxWords is the hard cap on words per synthesis chunk. Zero disables
+	// segmentation: input is sent to the sidecar whole.
+	MaxWords int
+	// TargetWords is the preferred chunk size. Zero means MaxWords/2.
+	TargetWords int
 }
 
 var (
@@ -211,6 +222,57 @@ func sidecarOptions(opts Options) map[string]any {
 	return options
 }
 
+// autoSegment rewrites input as newline-separated chunks of at most MaxWords
+// and asks the sidecar to cut at those newlines, so peak VRAM is bounded by the
+// chunk size rather than by the length of the request.
+//
+// The sidecar cross-fades between chunks, so the split is inaudible as long as
+// it lands on a sentence boundary — which is why boundaries come from a real
+// segmenter rather than from splitting on every period.
+//
+// Returns input unchanged when segmentation is disabled or unnecessary.
+func (p Provider) autoSegment(ctx context.Context, input, language string, options map[string]any) string {
+	if p.MaxWords <= 0 || p.Segmenter == nil {
+		return input
+	}
+	if segment.WordCount(input) <= p.MaxWords {
+		return input
+	}
+
+	target := p.TargetWords
+	if target <= 0 {
+		target = p.MaxWords / 2
+	}
+
+	sentences, err := p.Segmenter.Segment(ctx, input, language)
+	if err != nil || len(sentences) == 0 {
+		if err != nil {
+			// Falling back to word boundaries keeps memory bounded; it only
+			// costs boundary quality, so the request still succeeds.
+			log.Printf("omnivoice: segmentation unavailable, falling back to word boundaries: %v", err)
+		}
+		sentences = []string{input}
+	}
+
+	chunks := segment.Pack(sentences, target, p.MaxWords)
+	if len(chunks) <= 1 {
+		return input
+	}
+
+	options["text_chunk_mode"] = "endline"
+	// The splitter only cuts where a line ends in terminal punctuation, so
+	// guarantee every chunk carries one. Without this a hard-split or
+	// unpunctuated chunk is not cut where we asked and the request falls back
+	// to a codepoint grid that ignores the word cap.
+	for i := range chunks {
+		chunks[i] = segment.Terminate(chunks[i])
+	}
+	// Backstop budget, sized to the word cap rather than generously: it only
+	// applies if a chunk still slips past the endline cut.
+	options["text_chunk_size"] = p.MaxWords * 6
+	return strings.Join(chunks, "\n")
+}
+
 func (p Provider) prepareUploadedReference(ctx context.Context, req provider.SpeechRequest, opts Options) (Options, func(), error) {
 	if len(req.SpeakerReference) == 0 {
 		return opts, func() {}, nil
@@ -303,6 +365,7 @@ func (p Provider) Synthesize(ctx context.Context, req provider.SpeechRequest) (p
 	defer cleanupReference()
 
 	options := sidecarOptions(opts)
+	input := p.autoSegment(ctx, req.Input, language, options)
 
 	sidecarFormat := ""
 	streamFormat := ""
@@ -315,7 +378,7 @@ func (p Provider) Synthesize(ctx context.Context, req provider.SpeechRequest) (p
 	}
 	sr := speechRequest{
 		Model:          id,
-		Input:          req.Input,
+		Input:          input,
 		Voice:          voice,
 		Language:       language,
 		Speed:          speed,

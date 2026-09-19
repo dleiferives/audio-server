@@ -96,6 +96,40 @@ The shipped implementation is `FFmpeg` (`internal/encode/ffmpeg.go`).
 
 The OmniVoice model (`k2-fsa/OmniVoice`) handles multilingual synthesis via diffusion. It chunks long input internally and reuses the first generated voice for consistency. The audio.cpp sidecar supports pseudo-streaming: it emits SSE `speech.audio.delta` events for generated text chunks. The Go provider decodes those events to raw PCM for `SynthesizeStream`; non-PCM buffered responses are encoded via the shared `encode.FFmpeg` instance.
 
+#### Auto-segmentation
+
+OmniVoice peak VRAM grows with input length. On a 4 GB card 128 words fit, while
+264 words fail trying to allocate a single 2004 MiB buffer — the model is fine,
+the request is simply too long to hold at once. Two config keys bound the work
+per synthesis:
+
+| Key | Meaning |
+|---|---|
+| `omnivoice_max_words` | Hard cap on words per chunk. **Unset or `0` disables segmentation**, and input is sent whole. |
+| `omnivoice_target_words` | Preferred chunk size; a chunk closes once it reaches this. Defaults to half of `omnivoice_max_words`. Usually 1-3 sentences. |
+| `segment_python` / `segment_script` | Interpreter and path for `tts/segment/segment.py`. |
+
+Sentence boundaries come from `pysbd` via `tts/segment/segment.py` (~40ms per
+call). `internal/segment.Pack` groups those sentences into chunks, and the
+provider hands them to the sidecar newline-separated with
+`text_chunk_mode=endline`, which cuts at those newlines and cross-fades between
+chunks so the seam is inaudible.
+
+The boundaries have to come from a real segmenter: the C++ `endline` splitter
+treats every `.` as a sentence break, so left to itself it cuts `Dr. Smith` in
+half. Measured on this GPU with `64`/`32`, a 264-word request holds flat at
+1690 MiB and produces 84.6s of audio, where the same request unsegmented
+OOMs.
+
+Two limits worth knowing. A single sentence longer than `omnivoice_max_words`
+cannot be split at a sentence boundary, so it is cut on word boundaries
+instead — audible, but bounded. And `endline` only cuts where a chunk ends in
+`.`, `!`, or `?`; for input with no terminal punctuation the codepoint budget
+(`max_words * 8`) is the backstop.
+
+Supertonic is deliberately left unsegmented: its memory does not scale the same
+way, so long input is passed straight through.
+
 The Go provider is a thin HTTP client: it calls `GET /health`, `GET /voices`, `POST /synthesize`, and (via `provider.Lifecycle`) `POST /load` / `POST /unload` on the sidecar. Enable it by setting `AUDIO_OMNIVOICE_ADDR` (or `-omnivoice-addr`) to the sidecar's base URL, e.g. `http://127.0.0.1:8020`; the provider is not registered when this is blank, so the main server starts fine without the sidecar running.
 
 Run the sidecar independently:

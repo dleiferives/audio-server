@@ -5,12 +5,13 @@
   "device": 0,
   "threads": 12,
   "lazy_load": true,
+  "min_free_memory_mb": 256,
   "model_spec_override": "../audio.cpp/model_specs",
   "models": [
     {
       "id": "supertonic",
       "family": "supertonic",
-      "path": "../models/Supertonic-3-GGUF/supertonic-3-q8_0.gguf",
+      "path": "../models/Supertonic-3-safetensors",
       "task": "tts",
       "mode": "streaming",
       "default_voice_preset": {

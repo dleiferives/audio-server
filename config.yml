@@ -21,13 +21,22 @@ omnivoice_enabled: true
 omnivoice_addr: "http://127.0.0.1:8020"
 omnivoice_concurrency: 1
 supertonic_addr: "http://127.0.0.1:8022"
+
+# OmniVoice peak VRAM grows with input length, so long input is segmented into
+# chunks. supertonic has no such limit and is deliberately left unsegmented.
+# Unset (or 0) disables segmentation entirely.
+omnivoice_max_words: 64        # hard cap per chunk
+omnivoice_target_words: 32     # preferred chunk size, usually 1-3 sentences
+segment_python: "/home/dleiferives/.pyenv/versions/audio-server/bin/python"
+segment_script: "tts/segment/segment.py"
 audiocpp_bin: "audio.cpp/build/linux-cuda-release/bin/audiocpp_server"
 audiocpp_idle_unload_seconds: 0  # keep resident until budget eviction; positive = idle timeout
-max_vram_mib: auto             # auto = total VRAM reported by nvidia-smi
+max_vram_mib: 2048             # below supertonic+omnivoice combined, so only one model is ever resident
 model_vram_mib:                # conservative residency estimates; tune per GPU/build
-  supertonic: 1024
-  omnivoice: 2048
-  parakeet: 1280
+  supertonic: 768
+  omnivoice: 1600
+  parakeet: 1024           # measured peak 867 over an idle card during cold load
+  moonshine: 768           # measured peak 463, but the buffer grows with utterance length
   nemotron: 1280
   qwen3-asr-0.6b: 1792
   qwen3-asr-1.7b: 3584
@@ -42,17 +51,17 @@ model_vram_mib:                # conservative residency estimates; tune per GPU/
 
 # ── STT ──
 stt_enabled: true
-default_stt_provider: "cohere-transcribe"
+default_stt_provider: "parakeet"
 parakeet_enabled: true
 parakeet_addr: "http://127.0.0.1:8026"
-nemotron_addr: "http://127.0.0.1:8024"
-qwen3_asr_0_6b_enabled: true
+nemotron_addr: ""
+qwen3_asr_0_6b_enabled: false
 qwen3_asr_0_6b_addr: "http://127.0.0.1:8027"
-qwen3_asr_1_7b_enabled: true
+qwen3_asr_1_7b_enabled: false
 qwen3_asr_1_7b_addr: "http://127.0.0.1:8028"
 
 # transcribe.cpp accepts many GGUF ASR families; Cohere Q8 is our first model.
-transcribecpp_enabled: true
+transcribecpp_enabled: false
 transcribecpp_provider_id: "cohere-transcribe"
 transcribecpp_addr: "http://127.0.0.1:8031"
 transcribecpp_bin: "bin/transcribecpp_server"
@@ -62,7 +71,7 @@ transcribecpp_backend: "cuda"
 transcribecpp_threads: 0
 
 # True incremental STT; use the WebSocket endpoint for live PCM audio.
-voxtral_realtime_enabled: true
+voxtral_realtime_enabled: false
 voxtral_realtime_addr: "http://127.0.0.1:8032"
 voxtral_realtime_port: 8032
 voxtral_realtime_model: "models/Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf"
@@ -70,16 +79,16 @@ voxtral_realtime_backend: "cuda"
 voxtral_realtime_threads: 0
 
 # ── autodubbing analysis ──
-analysis_enabled: true
+analysis_enabled: false
 analysis_max_upload_mib: 2048
-sortformer_addr: "http://127.0.0.1:8033"
+sortformer_addr: ""
 sortformer_port: 8033
-bs_roformer_addr: "http://127.0.0.1:8035"
+bs_roformer_addr: ""
 bs_roformer_port: 8035
-htdemucs_addr: "http://127.0.0.1:8039"
+htdemucs_addr: ""
 htdemucs_port: 8039
 default_analysis_separator: "bs-roformer"
-wespeaker_enabled: true
+wespeaker_enabled: false
 wespeaker_addr: "http://127.0.0.1:8034"
 wespeaker_port: 8034
 wespeaker_bin: "bin/wespeaker_server"
@@ -126,7 +135,7 @@ cosyvoice_model_dir: "tts/cosyvoice/pretrained_models/CosyVoice2-0.5B"
 cosyvoice_device: "cuda"
 
 # ── faster-whisper (shared GPU lifecycle) ──
-faster_whisper_enabled: true
+faster_whisper_enabled: false
 faster_whisper_addr: "http://127.0.0.1:8030"
 faster_whisper_python: "/home/dleiferives/.pyenv/versions/audio-server/bin/python"
 faster_whisper_script: "stt/fasterwhisper/server.py"

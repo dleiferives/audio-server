@@ -1,6 +1,6 @@
 {
   "host": "127.0.0.1",
-  "port": 8020,
+  "port": 8027,
   "backend": "cuda",
   "device": 0,
   "threads": 12,
@@ -9,10 +9,10 @@
   "model_spec_override": "../audio.cpp/model_specs",
   "models": [
     {
-      "id": "omnivoice",
-      "family": "omnivoice",
-      "path": "../models/OmniVoice-GGUF/omnivoice-q8_0.gguf",
-      "task": "tts",
+      "id": "moonshine",
+      "family": "moonshine_asr",
+      "path": "../audio.cpp/models/Moonshine-Streaming-GGUF/moonshine-streaming-medium-q8_0.gguf",
+      "task": "asr",
       "mode": "streaming"
     }
   ]
