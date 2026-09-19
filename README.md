@@ -222,6 +222,12 @@ curl -sS http://127.0.0.1:8010/v1/audio/alignments \
   -F language=el
 ```
 
+For multiple independent clips, prefer `POST /v1/audio/alignments/batch`.
+Send a JSON `manifest` field containing `language` and ordered
+`{id, transcript}` items, plus one repeated `file` part per item. The job uses
+one MFA corpus/invocation and returns an `items` array keyed by those IDs,
+avoiding Python, Kaldi, dictionary, and acoustic-model startup per clip.
+
 Language codes map to MFA model names via `mfa/models.yaml`.
 
 > **TODO:** Replace the MFA subprocess call with direct Kaldi CGo wiring

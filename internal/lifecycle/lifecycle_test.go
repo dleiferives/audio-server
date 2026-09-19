@@ -44,6 +44,7 @@ func TestBudgetKeepsModelsResidentAndEvictsLRU(t *testing.T) {
 	defer health.Close()
 
 	m := NewManager("unused", Config{MaxVRAMMiB: 200})
+	m.usedVRAMFunc = nil // isolate from the test host's real GPU usage
 	for _, name := range []string{"first", "second", "third"} {
 		m.RegisterCommandModel(name, "/bin/sh", []string{"-c", "while :; do sleep 1; done"}, health.URL, 0, 100)
 	}
@@ -78,6 +79,7 @@ func TestAcquireProtectsActiveModelAndSerializesExecution(t *testing.T) {
 	defer health.Close()
 
 	m := NewManager("unused", Config{MaxVRAMMiB: 100})
+	m.usedVRAMFunc = nil // isolate from the test host's real GPU usage
 	for _, name := range []string{"first", "second"} {
 		m.RegisterCommandModel(name, "/bin/sh", []string{"-c", "while :; do sleep 1; done"}, health.URL, 0, 100)
 	}

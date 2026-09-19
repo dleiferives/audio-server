@@ -44,13 +44,16 @@ SORTFORMER_MODEL_SHA256 := 4fa6a3e30c4a1c6cc1da455268806edc93432ca1e1b5b6923e942
 BS_ROFORMER_MODEL := models/BS-RoFormer-ep368_Q8/BS-RoFormer-ep368_Q8.gguf
 BS_ROFORMER_MODEL_URL := https://huggingface.co/mirek190/audio.cpp/resolve/main/vocal%20separation%20models/BS-RoFormer-ep368_Q8.gguf
 BS_ROFORMER_MODEL_SHA256 := 9a55a8cad369d00f6e0fb208bb0cd87e30e25430772b8491e20a4eace6423ad2
+HTDEMUCS_MODEL := models/HTDemucs-GGUF/htdemucs-q8_0.gguf
+HTDEMUCS_MODEL_URL := https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/HTDemucs-GGUF/htdemucs-q8_0.gguf
+HTDEMUCS_MODEL_SHA256 := b0f532ac6e5f373aeb11fa0df73253251e133832d9c8b9942dc58f50bc5b4388
 COHERE_MODEL := models/cohere-transcribe-03-2026-Q8_0.gguf
 COHERE_MODEL_URL := https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf/resolve/main/cohere-transcribe-03-2026-Q8_0.gguf
 VOXTRAL_MODEL := models/Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf
 VOXTRAL_MODEL_URL := https://huggingface.co/handy-computer/Voxtral-Mini-4B-Realtime-2602-gguf/resolve/main/Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf
 CUDA_HOME ?= /usr/local/cuda
 
-.PHONY: build build-audiocpp build-transcribecpp build-wespeaker download-cohere download-voxtral download-wespeaker download-sortformer download-bs-roformer run stop clean
+.PHONY: build build-audiocpp build-transcribecpp build-wespeaker download-cohere download-voxtral download-wespeaker download-sortformer download-bs-roformer download-htdemucs run stop clean
 
 build:
 	@echo "  → building $(BIN)"
@@ -73,6 +76,8 @@ download-wespeaker: $(WESPEAKER_MODEL)
 download-sortformer: $(SORTFORMER_MODEL)
 
 download-bs-roformer: $(BS_ROFORMER_MODEL)
+
+download-htdemucs: $(HTDEMUCS_MODEL)
 
 $(AUDIOCPP_SENTINEL):
 	@echo "  → building audiocpp_server (one-time, ~5-10 min)..."
@@ -175,6 +180,13 @@ $(BS_ROFORMER_MODEL):
 	@echo "$(BS_ROFORMER_MODEL_SHA256)  $@" | sha256sum --check --strict
 	@echo "  → downloaded $@"
 
+$(HTDEMUCS_MODEL):
+	@mkdir -p models/HTDemucs-GGUF
+	@echo "  → downloading HTDemucs Q8 model (~59 MB)..."
+	curl --fail --location --continue-at - --output "$@" "$(HTDEMUCS_MODEL_URL)"
+	@echo "$(HTDEMUCS_MODEL_SHA256)  $@" | sha256sum --check --strict
+	@echo "  → downloaded $@"
+
 run: build
 	@if [ "$(OMNIVOICE)" = "1" ] && [ ! -f "$(AUDIOCPP_SENTINEL)" ]; then \
 		$(MAKE) $(AUDIOCPP_SENTINEL); \
@@ -200,11 +212,17 @@ run: build
 	@if [ "$(WESPEAKER)" = "1" ] && [ ! -f "$(BS_ROFORMER_MODEL)" ]; then \
 		$(MAKE) $(BS_ROFORMER_MODEL); \
 	fi
+	@if [ "$(WESPEAKER)" = "1" ] && [ ! -f "$(HTDEMUCS_MODEL)" ]; then \
+		$(MAKE) $(HTDEMUCS_MODEL); \
+	fi
 	@mkdir -p $(PIDIR)
 	@fuser -k $(OMNIVOICE_PORT)/tcp 2>/dev/null && sleep 0.5 || true
 	@fuser -k $(SERVER_PORT)/tcp 2>/dev/null && sleep 0.5 || true
 	@trap '$(MAKE) --no-print-directory stop' INT TERM; \
 	set -e; \
+	if [ -f $(CURDIR)/.env.local ]; then \
+		set -a; . $(CURDIR)/.env.local; set +a; \
+	fi; \
 	echo '  → starting providers...'; \
 	if [ "$(ESPEAK)" = "1" ]; then \
 		echo '  →   espeak-ng ready'; \

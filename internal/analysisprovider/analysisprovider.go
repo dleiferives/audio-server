@@ -14,6 +14,14 @@ var (
 type AudioRequest struct {
 	Audio    []byte
 	Filename string
+
+	// NumSpeakers/MinSpeakers/MaxSpeakers are optional hints for diarizers
+	// that support constraining cluster count (e.g. pyannote). Zero means
+	// unset/automatic. Diarizers that don't support this (e.g. Sortformer's
+	// fixed local-speaker cap) simply ignore them.
+	NumSpeakers int
+	MinSpeakers int
+	MaxSpeakers int
 }
 
 type SpeakerTurn struct {
@@ -27,6 +35,14 @@ type DiarizationResult struct {
 	ProviderID string        `json:"provider"`
 	SampleRate int           `json:"sample_rate"`
 	Turns      []SpeakerTurn `json:"turns"`
+
+	// SpeakerEmbeddings and EmbeddingModel are set by diarizers that compute
+	// per-speaker embeddings as part of the same whole-clip pass (e.g.
+	// pyannote), keyed by SpeakerTurn.SpeakerID. When present, callers can
+	// use them directly instead of running a separate embedding provider
+	// over collected per-speaker samples.
+	SpeakerEmbeddings map[string][]float32 `json:"speaker_embeddings,omitempty"`
+	EmbeddingModel    string               `json:"embedding_model,omitempty"`
 }
 
 type EmbeddingResult struct {

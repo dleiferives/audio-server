@@ -36,6 +36,9 @@ model_vram_mib:                # conservative residency estimates; tune per GPU/
   voxtral-realtime: 4800
   sortformer: 512
   bs-roformer: 2048
+  htdemucs: 2048
+  htdemucs-dnr: 2560
+  pyannote: 1536
 
 # ── STT ──
 stt_enabled: true
@@ -73,11 +76,28 @@ sortformer_addr: "http://127.0.0.1:8033"
 sortformer_port: 8033
 bs_roformer_addr: "http://127.0.0.1:8035"
 bs_roformer_port: 8035
+htdemucs_addr: "http://127.0.0.1:8039"
+htdemucs_port: 8039
+default_analysis_separator: "bs-roformer"
 wespeaker_enabled: true
 wespeaker_addr: "http://127.0.0.1:8034"
 wespeaker_port: 8034
 wespeaker_bin: "bin/wespeaker_server"
 wespeaker_model: "models/wespeaker/voxceleb_gemini_dfresnet114_LM.onnx"
+pyannote_enabled: true
+pyannote_addr: "http://127.0.0.1:8036"
+pyannote_port: 8036
+pyannote_python: "speaker/pyannote/.venv/bin/python"
+pyannote_script: "speaker/pyannote/server.py"
+pyannote_model: "pyannote/speaker-diarization-community-1"
+pyannote_device: "cuda"
+default_analysis_diarizer: "sortformer"
+htdemucs_dnr_enabled: true
+htdemucs_dnr_addr: "http://127.0.0.1:8041"
+htdemucs_dnr_port: 8041
+htdemucs_dnr_python: "separation/htdemucs-dnr/.venv/bin/python"
+htdemucs_dnr_script: "separation/htdemucs-dnr/server.py"
+htdemucs_dnr_device: "cuda"
 
 # ── alignment (MFA) ──
 align_enabled: true
@@ -87,6 +107,23 @@ align_mfa_models_config: "mfa/models.yaml"
 
 # ── disabled providers ──
 kokoro_enabled: false
+
+# ── voice cloning fallbacks (OmniVoice alternatives) ──
+chatterbox_enabled: true
+chatterbox_addr: "http://127.0.0.1:8037"
+chatterbox_port: 8037
+chatterbox_python: "tts/chatterbox/.venv/bin/python"
+chatterbox_script: "tts/chatterbox/server.py"
+chatterbox_device: "cuda"
+
+cosyvoice_enabled: true
+cosyvoice_addr: "http://127.0.0.1:8038"
+cosyvoice_port: 8038
+cosyvoice_python: "tts/cosyvoice/.venv/bin/python"
+cosyvoice_script: "tts/cosyvoice/server.py"
+cosyvoice_repo_path: "tts/cosyvoice/repo"
+cosyvoice_model_dir: "tts/cosyvoice/pretrained_models/CosyVoice2-0.5B"
+cosyvoice_device: "cuda"
 
 # ── faster-whisper (shared GPU lifecycle) ──
 faster_whisper_enabled: true

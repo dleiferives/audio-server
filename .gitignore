@@ -10,4 +10,15 @@ __pycache__/
 /audio-output/
 /mfa/work/
 /mfa/.mamba/
+/mfa/env/
+
+# per-model python envs, git checkouts, and downloaded weights
+.venv/
+/tts/cosyvoice/repo/
+/tts/cosyvoice/pretrained_models/
+/speaker/pyannote/.venv/
+/separation/htdemucs-dnr/models/
 /.commandcode/taste
+
+# local secrets (never commit)
+.env.local

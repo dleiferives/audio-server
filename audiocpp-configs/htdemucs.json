@@ -1,0 +1,18 @@
+{
+  "host": "127.0.0.1",
+  "port": 8039,
+  "backend": "cuda",
+  "device": 0,
+  "threads": 12,
+  "lazy_load": true,
+  "model_spec_override": "../audio.cpp/model_specs",
+  "models": [
+    {
+      "id": "htdemucs",
+      "family": "htdemucs",
+      "path": "../models/HTDemucs-GGUF/htdemucs-q8_0.gguf",
+      "task": "sep",
+      "mode": "offline"
+    }
+  ]
+}

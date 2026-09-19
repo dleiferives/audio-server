@@ -1,7 +1,9 @@
 package lifecycle
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -21,6 +23,12 @@ type Manager struct {
 	mu         sync.Mutex
 	instances  map[string]*instance
 	maxVRAMMiB int
+
+	// usedVRAMFunc measures current GPU memory usage for budget decisions.
+	// Defaults to UsedVRAMMiB (real nvidia-smi usage); tests set it to nil
+	// to fall back to the sum of registered instances' estimated vramMiB,
+	// keeping them independent of whatever the host GPU is actually doing.
+	usedVRAMFunc func() (int, error)
 }
 
 type instance struct {
@@ -50,9 +58,10 @@ func NewManager(binaryPath string, configs ...Config) *Manager {
 		cfg = configs[0]
 	}
 	return &Manager{
-		BinaryPath: binaryPath,
-		instances:  make(map[string]*instance),
-		maxVRAMMiB: cfg.MaxVRAMMiB,
+		BinaryPath:   binaryPath,
+		instances:    make(map[string]*instance),
+		maxVRAMMiB:   cfg.MaxVRAMMiB,
+		usedVRAMFunc: UsedVRAMMiB,
 	}
 }
 
@@ -67,6 +76,22 @@ func DetectVRAMMiB() (int, error) {
 	value, err := strconv.Atoi(line)
 	if err != nil || value <= 0 {
 		return 0, fmt.Errorf("detect VRAM: invalid nvidia-smi output %q", line)
+	}
+	return value, nil
+}
+
+// UsedVRAMMiB returns the first NVIDIA GPU's currently used memory, as
+// measured by the driver, rather than the sum of hand-tuned per-model
+// estimates.
+func UsedVRAMMiB() (int, error) {
+	out, err := exec.Command("nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits").Output()
+	if err != nil {
+		return 0, fmt.Errorf("query used VRAM: %w", err)
+	}
+	line := strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
+	value, err := strconv.Atoi(line)
+	if err != nil || value < 0 {
+		return 0, fmt.Errorf("query used VRAM: invalid nvidia-smi output %q", line)
 	}
 	return value, nil
 }
@@ -172,15 +197,45 @@ func (m *Manager) start(name string, exclusive, acquire bool) error {
 		return err
 	}
 
+	for {
+		oom, err := m.tryStartLocked(inst)
+		if err == nil {
+			break
+		}
+		if !oom || !m.evictOldestIdleLocked(name) {
+			return err
+		}
+		log.Printf("lifecycle: %s failed to start (OOM), evicted an idle model and retrying", name)
+	}
+
+	inst.mu.Lock()
+	if acquire {
+		inst.active++
+	}
+	if inst.idleTimeout > 0 && !inst.watcherStarted {
+		inst.watcherStarted = true
+		go m.idleWatcher(inst)
+	}
+	inst.mu.Unlock()
+	return nil
+}
+
+// tryStartLocked launches inst's process and waits for it to become
+// healthy. On failure it reports whether the process's stderr looks like a
+// GPU out-of-memory error, so the caller can free room and retry rather than
+// failing the request outright.
+func (m *Manager) tryStartLocked(inst *instance) (oom bool, err error) {
 	inst.mu.Lock()
 	defer inst.mu.Unlock()
+
 	log.Printf("lifecycle: starting %s (estimated VRAM %d MiB)", inst.name, inst.vramMiB)
+	var stderrBuf bytes.Buffer
 	cmd := exec.Command(inst.binaryPath, inst.args...)
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("lifecycle %s start: %w", inst.name, err)
+		return false, fmt.Errorf("lifecycle %s start: %w", inst.name, err)
 	}
 	inst.cmd = cmd
 	inst.lastUsed = time.Now()
@@ -203,17 +258,61 @@ func (m *Manager) start(name string, exclusive, acquire bool) error {
 	}
 	if !healthy {
 		inst.stopLocked()
-		return fmt.Errorf("lifecycle %s start: health check timed out", inst.name)
+		return isOOMText(stderrBuf.String()), fmt.Errorf("lifecycle %s start: health check timed out", inst.name)
 	}
-	if acquire {
-		inst.active++
-	}
+	return false, nil
+}
 
-	if inst.idleTimeout > 0 && !inst.watcherStarted {
-		inst.watcherStarted = true
-		go m.idleWatcher(inst)
+// isOOMText reports whether a sidecar's stderr output looks like a GPU
+// out-of-memory failure rather than some other startup error.
+func isOOMText(s string) bool {
+	s = strings.ToLower(s)
+	for _, marker := range []string{
+		"out of memory",
+		"failed to allocate",
+		"cudamalloc failed",
+		"cuda error",
+		"insufficient memory",
+	} {
+		if strings.Contains(s, marker) {
+			return true
+		}
 	}
-	return nil
+	return false
+}
+
+// evictOldestIdleLocked stops the least-recently-used instance other than
+// exclude that has no in-flight requests, returning whether it stopped one.
+// Instances a job is actively using (active > 0) are left running — the
+// caller has to wait for those rather than evicting work out from under it.
+func (m *Manager) evictOldestIdleLocked(exclude string) bool {
+	var oldest *instance
+	var oldestLastUsed time.Time
+	m.mu.Lock()
+	for name, candidate := range m.instances {
+		if name == exclude {
+			continue
+		}
+		candidate.mu.Lock()
+		eligible := candidate.cmd != nil && candidate.cmd.Process != nil && candidate.active == 0
+		lastUsed := candidate.lastUsed
+		candidate.mu.Unlock()
+		if eligible && (oldest == nil || lastUsed.Before(oldestLastUsed)) {
+			oldest = candidate
+			oldestLastUsed = lastUsed
+		}
+	}
+	m.mu.Unlock()
+	if oldest == nil {
+		return false
+	}
+	oldest.mu.Lock()
+	stopped := oldest.cmd != nil && oldest.active == 0
+	if stopped {
+		oldest.stopLocked()
+	}
+	oldest.mu.Unlock()
+	return stopped
 }
 
 // makeRoomLocked evicts idle resident models in least-recently-used order.
@@ -232,7 +331,7 @@ func (m *Manager) makeRoomLocked(requested string, requiredMiB int) error {
 		last time.Time
 	}
 	var residents []resident
-	used := 0
+	estimated := 0
 	m.mu.Lock()
 	for name, candidate := range m.instances {
 		if name == requested {
@@ -240,12 +339,25 @@ func (m *Manager) makeRoomLocked(requested string, requiredMiB int) error {
 		}
 		candidate.mu.Lock()
 		if candidate.cmd != nil && candidate.cmd.Process != nil {
-			used += candidate.vramMiB
+			estimated += candidate.vramMiB
 			residents = append(residents, resident{inst: candidate, used: candidate.vramMiB, last: candidate.lastUsed})
 		}
 		candidate.mu.Unlock()
 	}
 	m.mu.Unlock()
+
+	// Prefer the driver's actual usage over the sum of hand-tuned
+	// per-model estimates, which reliably undercounts real footprint
+	// (CUDA context, KV-cache growth, etc.) and left VRAM exhaustion
+	// undetected. Fall back to the estimate if nvidia-smi is unavailable.
+	used := estimated
+	if m.usedVRAMFunc != nil {
+		if measured, err := m.usedVRAMFunc(); err == nil {
+			used = measured
+		} else {
+			log.Printf("lifecycle: measuring used VRAM failed, falling back to estimates: %v", err)
+		}
+	}
 	if used+requiredMiB <= m.maxVRAMMiB {
 		return nil
 	}
@@ -253,11 +365,24 @@ func (m *Manager) makeRoomLocked(requested string, requiredMiB int) error {
 	sort.Slice(residents, func(i, j int) bool { return residents[i].last.Before(residents[j].last) })
 	for _, candidate := range residents {
 		candidate.inst.mu.Lock()
-		if candidate.inst.active == 0 && candidate.inst.cmd != nil {
+		stopped := candidate.inst.active == 0 && candidate.inst.cmd != nil
+		if stopped {
 			candidate.inst.stopLocked()
-			used -= candidate.used
 		}
 		candidate.inst.mu.Unlock()
+		if !stopped {
+			continue
+		}
+
+		if m.usedVRAMFunc != nil {
+			if measured, err := m.usedVRAMFunc(); err == nil {
+				used = measured
+			} else {
+				used -= candidate.used
+			}
+		} else {
+			used -= candidate.used
+		}
 		if used+requiredMiB <= m.maxVRAMMiB {
 			return nil
 		}

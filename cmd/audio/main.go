@@ -23,18 +23,24 @@ import (
 	"github.com/dleiferives/audio-server/internal/provider"
 	"github.com/dleiferives/audio-server/internal/provider/align"
 	"github.com/dleiferives/audio-server/internal/provider/bsroformer"
+	"github.com/dleiferives/audio-server/internal/provider/chatterbox"
+	"github.com/dleiferives/audio-server/internal/provider/cosyvoice"
 	"github.com/dleiferives/audio-server/internal/provider/espeak"
 	"github.com/dleiferives/audio-server/internal/provider/fasterwhisper"
+	"github.com/dleiferives/audio-server/internal/provider/htdemucs"
+	"github.com/dleiferives/audio-server/internal/provider/htdemucsdnr"
 	"github.com/dleiferives/audio-server/internal/provider/kokoro"
 	"github.com/dleiferives/audio-server/internal/provider/nemotron"
 	"github.com/dleiferives/audio-server/internal/provider/omnivoice"
 	"github.com/dleiferives/audio-server/internal/provider/parakeet"
+	"github.com/dleiferives/audio-server/internal/provider/pyannote"
 	"github.com/dleiferives/audio-server/internal/provider/qwen3asr"
 	"github.com/dleiferives/audio-server/internal/provider/sortformer"
 	"github.com/dleiferives/audio-server/internal/provider/supertonic"
 	"github.com/dleiferives/audio-server/internal/provider/transcribecpp"
 	"github.com/dleiferives/audio-server/internal/provider/wespeaker"
 	"github.com/dleiferives/audio-server/internal/queue"
+	"github.com/dleiferives/audio-server/internal/separationjob"
 	"github.com/dleiferives/audio-server/internal/server"
 	"github.com/dleiferives/audio-server/internal/store"
 	"github.com/dleiferives/audio-server/internal/sttprovider"
@@ -64,6 +70,20 @@ type configFile struct {
 	MaxVRAMMiB                any            `yaml:"max_vram_mib"`
 	ModelVRAMMiB              map[string]int `yaml:"model_vram_mib"`
 	KokoroEnabled             bool           `yaml:"kokoro_enabled"`
+	ChatterboxEnabled         bool           `yaml:"chatterbox_enabled"`
+	ChatterboxAddr            string         `yaml:"chatterbox_addr"`
+	ChatterboxPort            int            `yaml:"chatterbox_port"`
+	ChatterboxPython          string         `yaml:"chatterbox_python"`
+	ChatterboxScript          string         `yaml:"chatterbox_script"`
+	ChatterboxDevice          string         `yaml:"chatterbox_device"`
+	CosyvoiceEnabled          bool           `yaml:"cosyvoice_enabled"`
+	CosyvoiceAddr             string         `yaml:"cosyvoice_addr"`
+	CosyvoicePort             int            `yaml:"cosyvoice_port"`
+	CosyvoicePython           string         `yaml:"cosyvoice_python"`
+	CosyvoiceScript           string         `yaml:"cosyvoice_script"`
+	CosyvoiceRepoPath         string         `yaml:"cosyvoice_repo_path"`
+	CosyvoiceModelDir         string         `yaml:"cosyvoice_model_dir"`
+	CosyvoiceDevice           string         `yaml:"cosyvoice_device"`
 	FasterWhisperEnabled      bool           `yaml:"faster_whisper_enabled"`
 	FasterWhisperAddr         string         `yaml:"faster_whisper_addr"`
 	FasterWhisperPython       string         `yaml:"faster_whisper_python"`
@@ -101,11 +121,29 @@ type configFile struct {
 	SortformerPort            int            `yaml:"sortformer_port"`
 	BSRoformerAddr            string         `yaml:"bs_roformer_addr"`
 	BSRoformerPort            int            `yaml:"bs_roformer_port"`
+	HTDemucsAddr              string         `yaml:"htdemucs_addr"`
+	HTDemucsPort              int            `yaml:"htdemucs_port"`
+	DefaultAnalysisSeparator  string         `yaml:"default_analysis_separator"`
 	WespeakerEnabled          bool           `yaml:"wespeaker_enabled"`
 	WespeakerAddr             string         `yaml:"wespeaker_addr"`
 	WespeakerPort             int            `yaml:"wespeaker_port"`
 	WespeakerBin              string         `yaml:"wespeaker_bin"`
 	WespeakerModel            string         `yaml:"wespeaker_model"`
+	PyannoteEnabled           bool           `yaml:"pyannote_enabled"`
+	PyannoteAddr              string         `yaml:"pyannote_addr"`
+	PyannotePort              int            `yaml:"pyannote_port"`
+	PyannotePython            string         `yaml:"pyannote_python"`
+	PyannoteScript            string         `yaml:"pyannote_script"`
+	PyannoteModel             string         `yaml:"pyannote_model"`
+	PyannoteDevice            string         `yaml:"pyannote_device"`
+	DefaultAnalysisDiarizer   string         `yaml:"default_analysis_diarizer"`
+	HTDemucsDnREnabled        bool           `yaml:"htdemucs_dnr_enabled"`
+	HTDemucsDnRAddr           string         `yaml:"htdemucs_dnr_addr"`
+	HTDemucsDnRPort           int            `yaml:"htdemucs_dnr_port"`
+	HTDemucsDnRPython         string         `yaml:"htdemucs_dnr_python"`
+	HTDemucsDnRScript         string         `yaml:"htdemucs_dnr_script"`
+	HTDemucsDnRCheckpoint     string         `yaml:"htdemucs_dnr_checkpoint"`
+	HTDemucsDnRDevice         string         `yaml:"htdemucs_dnr_device"`
 	AlignEnabled              bool           `yaml:"align_enabled"`
 	AlignMFAEnv               string         `yaml:"align_mfa_env"`
 	AlignMFAWorkDir           string         `yaml:"align_mfa_work_dir"`
@@ -144,6 +182,20 @@ func main() {
 	audiocppIdle := flag.Int("audiocpp-idle-unload-seconds", envInt("AUDIO_AUDIOCPP_IDLE_UNLOAD", cfg.AudiocppIdleUnloadSeconds), "seconds before unloading idle audiocpp_server instances")
 	maxVRAM := flag.String("max-vram-mib", env("AUDIO_MAX_VRAM_MIB", vramLimitString(cfg.MaxVRAMMiB)), "GPU residency budget in MiB, or auto")
 	kokoroEnabled := flag.Bool("kokoro-enabled", cfg.KokoroEnabled, "enable Kokoro TTS provider")
+	chatterboxEnabled := flag.Bool("chatterbox-enabled", cfg.ChatterboxEnabled, "enable Chatterbox voice-cloning TTS provider")
+	chatterboxAddr := flag.String("chatterbox-addr", env("AUDIO_CHATTERBOX_ADDR", valueOr(cfg.ChatterboxAddr, "http://127.0.0.1:8037")), "Chatterbox sidecar base URL")
+	chatterboxPort := flag.Int("chatterbox-port", envInt("AUDIO_CHATTERBOX_PORT", intOr(cfg.ChatterboxPort, 8037)), "local Chatterbox sidecar port")
+	chatterboxPython := flag.String("chatterbox-python", env("AUDIO_CHATTERBOX_PYTHON", valueOr(cfg.ChatterboxPython, "python3")), "Python executable for the Chatterbox sidecar")
+	chatterboxScript := flag.String("chatterbox-script", env("AUDIO_CHATTERBOX_SCRIPT", valueOr(cfg.ChatterboxScript, "tts/chatterbox/server.py")), "path to the Chatterbox sidecar script")
+	chatterboxDevice := flag.String("chatterbox-device", env("AUDIO_CHATTERBOX_DEVICE", valueOr(cfg.ChatterboxDevice, "auto")), "Chatterbox inference device")
+	cosyvoiceEnabled := flag.Bool("cosyvoice-enabled", cfg.CosyvoiceEnabled, "enable CosyVoice2 voice-cloning TTS provider")
+	cosyvoiceAddr := flag.String("cosyvoice-addr", env("AUDIO_COSYVOICE_ADDR", valueOr(cfg.CosyvoiceAddr, "http://127.0.0.1:8038")), "CosyVoice2 sidecar base URL")
+	cosyvoicePort := flag.Int("cosyvoice-port", envInt("AUDIO_COSYVOICE_PORT", intOr(cfg.CosyvoicePort, 8038)), "local CosyVoice2 sidecar port")
+	cosyvoicePython := flag.String("cosyvoice-python", env("AUDIO_COSYVOICE_PYTHON", valueOr(cfg.CosyvoicePython, "python3")), "Python executable for the CosyVoice2 sidecar")
+	cosyvoiceScript := flag.String("cosyvoice-script", env("AUDIO_COSYVOICE_SCRIPT", valueOr(cfg.CosyvoiceScript, "tts/cosyvoice/server.py")), "path to the CosyVoice2 sidecar script")
+	cosyvoiceRepoPath := flag.String("cosyvoice-repo-path", env("AUDIO_COSYVOICE_REPO_PATH", cfg.CosyvoiceRepoPath), "path to a FunAudioLLM/CosyVoice checkout (put on PYTHONPATH)")
+	cosyvoiceModelDir := flag.String("cosyvoice-model-dir", env("AUDIO_COSYVOICE_MODEL_DIR", valueOr(cfg.CosyvoiceModelDir, "FunAudioLLM/CosyVoice2-0.5B")), "CosyVoice2 model id or local directory")
+	cosyvoiceDevice := flag.String("cosyvoice-device", env("AUDIO_COSYVOICE_DEVICE", valueOr(cfg.CosyvoiceDevice, "auto")), "CosyVoice2 inference device")
 	fasterWhisperEnabled := flag.Bool("faster-whisper-enabled", cfg.FasterWhisperEnabled, "enable faster-whisper STT provider")
 	fasterWhisperAddr := flag.String("faster-whisper-addr", env("AUDIO_FASTERWHISPER_ADDR", valueOr(cfg.FasterWhisperAddr, "http://127.0.0.1:8030")), "faster-whisper sidecar base URL")
 	fasterWhisperPython := flag.String("faster-whisper-python", env("AUDIO_FASTERWHISPER_PYTHON", valueOr(cfg.FasterWhisperPython, "python3")), "Python executable for the faster-whisper sidecar")
@@ -181,11 +233,29 @@ func main() {
 	sortformerPort := flag.Int("sortformer-port", envInt("AUDIO_SORTFORMER_PORT", intOr(cfg.SortformerPort, 8033)), "local Sortformer sidecar port")
 	bsRoformerAddr := flag.String("bs-roformer-addr", env("AUDIO_BS_ROFORMER_ADDR", valueOr(cfg.BSRoformerAddr, "http://127.0.0.1:8035")), "BS-RoFormer audio.cpp sidecar base URL")
 	bsRoformerPort := flag.Int("bs-roformer-port", envInt("AUDIO_BS_ROFORMER_PORT", intOr(cfg.BSRoformerPort, 8035)), "local BS-RoFormer sidecar port")
+	htdemucsAddr := flag.String("htdemucs-addr", env("AUDIO_HTDEMUCS_ADDR", valueOr(cfg.HTDemucsAddr, "http://127.0.0.1:8039")), "HTDemucs audio.cpp sidecar base URL")
+	htdemucsPort := flag.Int("htdemucs-port", envInt("AUDIO_HTDEMUCS_PORT", intOr(cfg.HTDemucsPort, 8039)), "local HTDemucs sidecar port")
+	defaultAnalysisSeparator := flag.String("default-analysis-separator", env("AUDIO_ANALYSIS_SEP_PROVIDER", valueOr(cfg.DefaultAnalysisSeparator, "bs-roformer")), "default dialogue-separation model for analysis/separation jobs")
 	wespeakerEnabled := flag.Bool("wespeaker-enabled", cfg.WespeakerEnabled, "enable native WeSpeaker speaker embeddings")
 	wespeakerAddr := flag.String("wespeaker-addr", env("AUDIO_WESPEAKER_ADDR", valueOr(cfg.WespeakerAddr, "http://127.0.0.1:8034")), "WeSpeaker sidecar base URL")
 	wespeakerPort := flag.Int("wespeaker-port", envInt("AUDIO_WESPEAKER_PORT", intOr(cfg.WespeakerPort, 8034)), "local WeSpeaker sidecar port")
 	wespeakerBin := flag.String("wespeaker-bin", env("AUDIO_WESPEAKER_BIN", valueOr(cfg.WespeakerBin, "bin/wespeaker_server")), "path to native WeSpeaker sidecar")
 	wespeakerModel := flag.String("wespeaker-model", env("AUDIO_WESPEAKER_MODEL", cfg.WespeakerModel), "path to WeSpeaker ONNX speaker model")
+	pyannoteEnabled := flag.Bool("pyannote-enabled", cfg.PyannoteEnabled, "enable pyannote.audio diarization provider")
+	pyannoteAddr := flag.String("pyannote-addr", env("AUDIO_PYANNOTE_ADDR", valueOr(cfg.PyannoteAddr, "http://127.0.0.1:8036")), "pyannote sidecar base URL")
+	pyannotePort := flag.Int("pyannote-port", envInt("AUDIO_PYANNOTE_PORT", intOr(cfg.PyannotePort, 8036)), "local pyannote sidecar port")
+	pyannotePython := flag.String("pyannote-python", env("AUDIO_PYANNOTE_PYTHON", valueOr(cfg.PyannotePython, "python3")), "Python executable for the pyannote sidecar")
+	pyannoteScript := flag.String("pyannote-script", env("AUDIO_PYANNOTE_SCRIPT", valueOr(cfg.PyannoteScript, "speaker/pyannote/server.py")), "path to the pyannote sidecar script")
+	pyannoteModel := flag.String("pyannote-model", env("AUDIO_PYANNOTE_MODEL", valueOr(cfg.PyannoteModel, "pyannote/speaker-diarization-community-1")), "pyannote pipeline model id")
+	pyannoteDevice := flag.String("pyannote-device", env("AUDIO_PYANNOTE_DEVICE", valueOr(cfg.PyannoteDevice, "auto")), "pyannote inference device")
+	defaultAnalysisDiarizer := flag.String("default-analysis-diarizer", env("AUDIO_ANALYSIS_DIAR_PROVIDER", valueOr(cfg.DefaultAnalysisDiarizer, "sortformer")), "default diarization model for analysis jobs")
+	htdemucsDnREnabled := flag.Bool("htdemucs-dnr-enabled", cfg.HTDemucsDnREnabled, "enable the DnR-trained cinematic (dialogue/music/effects) HTDemucs separator")
+	htdemucsDnRAddr := flag.String("htdemucs-dnr-addr", env("AUDIO_HTDEMUCS_DNR_ADDR", valueOr(cfg.HTDemucsDnRAddr, "http://127.0.0.1:8041")), "HTDemucs-DnR sidecar base URL")
+	htdemucsDnRPort := flag.Int("htdemucs-dnr-port", envInt("AUDIO_HTDEMUCS_DNR_PORT", intOr(cfg.HTDemucsDnRPort, 8041)), "local HTDemucs-DnR sidecar port")
+	htdemucsDnRPython := flag.String("htdemucs-dnr-python", env("AUDIO_HTDEMUCS_DNR_PYTHON", valueOr(cfg.HTDemucsDnRPython, "python3")), "Python executable for the HTDemucs-DnR sidecar")
+	htdemucsDnRScript := flag.String("htdemucs-dnr-script", env("AUDIO_HTDEMUCS_DNR_SCRIPT", valueOr(cfg.HTDemucsDnRScript, "separation/htdemucs-dnr/server.py")), "path to the HTDemucs-DnR sidecar script")
+	htdemucsDnRCheckpoint := flag.String("htdemucs-dnr-checkpoint", env("AUDIO_HTDEMUCS_DNR_CHECKPOINT", cfg.HTDemucsDnRCheckpoint), "path to the HTDemucs-DnR .th checkpoint (blank = sidecar default)")
+	htdemucsDnRDevice := flag.String("htdemucs-dnr-device", env("AUDIO_HTDEMUCS_DNR_DEVICE", valueOr(cfg.HTDemucsDnRDevice, "auto")), "HTDemucs-DnR inference device")
 	webDir := flag.String("web-dir", env("AUDIO_WEB_DIR", cfg.WebDir), "optional path to static web frontend directory")
 	audioTTL := flag.Int("audio-ttl-seconds", envInt("AUDIO_AUDIO_TTL_SECONDS", cfg.AudioTTLSeconds), "audio file retention in seconds (0 = forever)")
 	audioStoreDir := flag.String("audio-store-dir", env("AUDIO_STORE_DIR", cfg.AudioStoreDir), "directory for generated audio files (empty = in-memory)")
@@ -201,7 +271,7 @@ func main() {
 	workers := map[string]int{espeakProvider.ID(): *maxConcurrency}
 
 	var gpuLifecycle *lifecycle.Manager
-	if strings.TrimSpace(*audiocppBin) != "" || *fasterWhisperEnabled || *transcribecppEnabled || *voxtralRealtimeEnabled || *analysisEnabled {
+	if strings.TrimSpace(*audiocppBin) != "" || *fasterWhisperEnabled || *transcribecppEnabled || *voxtralRealtimeEnabled || *analysisEnabled || *chatterboxEnabled || *cosyvoiceEnabled {
 		maxVRAMMiB, err := resolveVRAMLimit(*maxVRAM)
 		if err != nil {
 			log.Fatalf("GPU VRAM configuration: %v", err)
@@ -237,11 +307,46 @@ func main() {
 		if *analysisEnabled && strings.TrimSpace(*audiocppBin) != "" && strings.TrimSpace(*bsRoformerAddr) != "" {
 			gpuLifecycle.RegisterModel("bs-roformer", "audiocpp-configs/bs-roformer.json", *bsRoformerPort, idleDelay, modelVRAM(cfg.ModelVRAMMiB, "bs-roformer", 2048))
 		}
+		if *analysisEnabled && strings.TrimSpace(*audiocppBin) != "" && strings.TrimSpace(*htdemucsAddr) != "" {
+			gpuLifecycle.RegisterModel("htdemucs", "audiocpp-configs/htdemucs.json", *htdemucsPort, idleDelay, modelVRAM(cfg.ModelVRAMMiB, "htdemucs", 2048))
+		}
 		if *analysisEnabled && *wespeakerEnabled && strings.TrimSpace(*wespeakerBin) != "" && strings.TrimSpace(*wespeakerModel) != "" {
 			gpuLifecycle.RegisterCommandModel(
 				"wespeaker", *wespeakerBin,
 				[]string{"--model", *wespeakerModel, "--host", "127.0.0.1", "--port", strconv.Itoa(*wespeakerPort)},
 				strings.TrimRight(*wespeakerAddr, "/")+"/health", 0, 0,
+			)
+		}
+		if *analysisEnabled && *pyannoteEnabled && strings.TrimSpace(*pyannotePython) != "" && strings.TrimSpace(*pyannoteScript) != "" {
+			gpuLifecycle.RegisterCommandModel(
+				"pyannote", *pyannotePython,
+				[]string{
+					*pyannoteScript,
+					"--host", "127.0.0.1",
+					"--port", strconv.Itoa(*pyannotePort),
+					"--model-id", *pyannoteModel,
+					"--device", *pyannoteDevice,
+				},
+				strings.TrimRight(*pyannoteAddr, "/")+"/health",
+				idleDelay,
+				modelVRAM(cfg.ModelVRAMMiB, "pyannote", 1536),
+			)
+		}
+		if *analysisEnabled && *htdemucsDnREnabled && strings.TrimSpace(*htdemucsDnRPython) != "" && strings.TrimSpace(*htdemucsDnRScript) != "" {
+			args := []string{
+				*htdemucsDnRScript,
+				"--host", "127.0.0.1",
+				"--port", strconv.Itoa(*htdemucsDnRPort),
+				"--device", *htdemucsDnRDevice,
+			}
+			if strings.TrimSpace(*htdemucsDnRCheckpoint) != "" {
+				args = append(args, "--checkpoint", *htdemucsDnRCheckpoint)
+			}
+			gpuLifecycle.RegisterCommandModel(
+				"htdemucs-dnr", *htdemucsDnRPython, args,
+				strings.TrimRight(*htdemucsDnRAddr, "/")+"/health",
+				idleDelay,
+				modelVRAM(cfg.ModelVRAMMiB, "htdemucs-dnr", 2560),
 			)
 		}
 		if *fasterWhisperEnabled && strings.TrimSpace(*fasterWhisperPython) != "" && strings.TrimSpace(*fasterWhisperScript) != "" {
@@ -294,6 +399,36 @@ func main() {
 				modelVRAM(cfg.ModelVRAMMiB, "voxtral-realtime", 4800),
 			)
 		}
+		if *chatterboxEnabled && strings.TrimSpace(*chatterboxPython) != "" && strings.TrimSpace(*chatterboxScript) != "" {
+			gpuLifecycle.RegisterCommandModel(
+				"chatterbox", *chatterboxPython,
+				[]string{
+					*chatterboxScript,
+					"--host", "127.0.0.1",
+					"--port", strconv.Itoa(*chatterboxPort),
+					"--device", *chatterboxDevice,
+				},
+				strings.TrimRight(*chatterboxAddr, "/")+"/health",
+				idleDelay,
+				modelVRAM(cfg.ModelVRAMMiB, "chatterbox", 3072),
+			)
+		}
+		if *cosyvoiceEnabled && strings.TrimSpace(*cosyvoicePython) != "" && strings.TrimSpace(*cosyvoiceScript) != "" {
+			gpuLifecycle.RegisterCommandModel(
+				"cosyvoice", *cosyvoicePython,
+				[]string{
+					*cosyvoiceScript,
+					"--host", "127.0.0.1",
+					"--port", strconv.Itoa(*cosyvoicePort),
+					"--model-dir", *cosyvoiceModelDir,
+					"--device", *cosyvoiceDevice,
+					"--repo-path", *cosyvoiceRepoPath,
+				},
+				strings.TrimRight(*cosyvoiceAddr, "/")+"/health",
+				idleDelay,
+				modelVRAM(cfg.ModelVRAMMiB, "cosyvoice", 4096),
+			)
+		}
 	}
 
 	if strings.TrimSpace(*omnivoiceAddr) != "" {
@@ -317,6 +452,22 @@ func main() {
 		providers = append(providers, kokoro.New(kokoroAddr, nil, encoder))
 		workers["kokoro"] = 1
 	}
+	if *chatterboxEnabled && strings.TrimSpace(*chatterboxAddr) != "" {
+		cb := chatterbox.New(*chatterboxAddr, nil, encoder)
+		if gpuLifecycle != nil && gpuLifecycle.Has("chatterbox") {
+			cb.StartFunc = func() error { return gpuLifecycle.Start("chatterbox", false) }
+		}
+		providers = append(providers, cb)
+		workers["chatterbox"] = 1
+	}
+	if *cosyvoiceEnabled && strings.TrimSpace(*cosyvoiceAddr) != "" {
+		cv := cosyvoice.New(*cosyvoiceAddr, nil, encoder)
+		if gpuLifecycle != nil && gpuLifecycle.Has("cosyvoice") {
+			cv.StartFunc = func() error { return gpuLifecycle.Start("cosyvoice", false) }
+		}
+		providers = append(providers, cv)
+		workers["cosyvoice"] = 1
+	}
 
 	providerMap := make(map[string]provider.Provider, len(providers))
 	for _, p := range providers {
@@ -327,6 +478,12 @@ func main() {
 		idleDelay := time.Duration(*audiocppIdle) * time.Second
 		idleUnload["omnivoice"] = idleDelay
 		idleUnload["supertonic"] = idleDelay
+		if *chatterboxEnabled {
+			idleUnload["chatterbox"] = idleDelay
+		}
+		if *cosyvoiceEnabled {
+			idleUnload["cosyvoice"] = idleDelay
+		}
 	}
 
 	requestTimeout := time.Duration(*requestTimeoutSeconds) * time.Second
@@ -409,14 +566,58 @@ func main() {
 	}
 
 	var analysisJobs *analysisjob.Manager
+	var separationJobs *separationjob.Manager
 	if *analysisEnabled {
-		diarizer := sortformer.New(*sortformerAddr, nil)
-		if gpuLifecycle != nil && gpuLifecycle.Has("sortformer") {
-			diarizer.StartFunc = func() error { return gpuLifecycle.Start("sortformer", false) }
+		diarizers := make(map[string]analysisprovider.Diarizer)
+		if strings.TrimSpace(*sortformerAddr) != "" {
+			diarizer := sortformer.New(*sortformerAddr, nil)
+			if gpuLifecycle != nil && gpuLifecycle.Has("sortformer") {
+				diarizer.StartFunc = func() error { return gpuLifecycle.Start("sortformer", false) }
+			}
+			diarizers[sortformer.ID] = diarizer
 		}
-		separator := bsroformer.New(*bsRoformerAddr, nil)
-		if gpuLifecycle != nil && gpuLifecycle.Has("bs-roformer") {
-			separator.StartFunc = func() error { return gpuLifecycle.Start("bs-roformer", false) }
+		if *pyannoteEnabled && strings.TrimSpace(*pyannoteAddr) != "" {
+			diarizer := pyannote.New(*pyannoteAddr, nil)
+			if gpuLifecycle != nil && gpuLifecycle.Has("pyannote") {
+				diarizer.StartFunc = func() error { return gpuLifecycle.Start("pyannote", false) }
+			}
+			diarizers[pyannote.ID] = diarizer
+		}
+		defaultDiarizer := *defaultAnalysisDiarizer
+		if _, ok := diarizers[defaultDiarizer]; !ok {
+			for id := range diarizers {
+				defaultDiarizer = id
+				break
+			}
+		}
+		separators := make(map[string]analysisprovider.Separator)
+		if strings.TrimSpace(*bsRoformerAddr) != "" {
+			separator := bsroformer.New(*bsRoformerAddr, nil)
+			if gpuLifecycle != nil && gpuLifecycle.Has("bs-roformer") {
+				separator.StartFunc = func() error { return gpuLifecycle.Start("bs-roformer", false) }
+			}
+			separators[bsroformer.ID] = separator
+		}
+		if strings.TrimSpace(*htdemucsAddr) != "" {
+			separator := htdemucs.New(*htdemucsAddr, nil)
+			if gpuLifecycle != nil && gpuLifecycle.Has("htdemucs") {
+				separator.StartFunc = func() error { return gpuLifecycle.Start("htdemucs", false) }
+			}
+			separators[htdemucs.ID] = separator
+		}
+		if *htdemucsDnREnabled && strings.TrimSpace(*htdemucsDnRAddr) != "" {
+			separator := htdemucsdnr.New(*htdemucsDnRAddr, nil)
+			if gpuLifecycle != nil && gpuLifecycle.Has("htdemucs-dnr") {
+				separator.StartFunc = func() error { return gpuLifecycle.Start("htdemucs-dnr", false) }
+			}
+			separators[htdemucsdnr.ID] = separator
+		}
+		defaultSeparator := *defaultAnalysisSeparator
+		if _, ok := separators[defaultSeparator]; !ok {
+			for id := range separators {
+				defaultSeparator = id
+				break
+			}
 		}
 		var embedder analysisprovider.Embedder
 		if *wespeakerEnabled {
@@ -431,10 +632,17 @@ func main() {
 			transcribers[provider.ID()] = provider
 		}
 		analysisJobs = analysisjob.New(analysisjob.Config{
-			Diarizer: diarizer, Embedder: embedder, Separator: separator, AudioNormalizer: encoder,
+			Diarizers: diarizers, DefaultDiarizer: defaultDiarizer,
+			Embedder: embedder, Separators: separators, DefaultSeparator: defaultSeparator, AudioNormalizer: encoder,
 			Transcribers: transcribers, DefaultTranscriber: *defaultSttProvider,
 			RunGate: gpuRunGate(gpuLifecycle), Timeout: requestTimeout,
 		})
+		if audioStore != nil {
+			separationJobs = separationjob.New(separationjob.Config{
+				Separators: separators, DefaultSeparator: defaultSeparator, AudioNormalizer: encoder,
+				Store: audioStore, RunGate: gpuRunGate(gpuLifecycle), Timeout: requestTimeout,
+			})
+		}
 	}
 
 	audioServer, err := server.New(server.Config{
@@ -454,6 +662,7 @@ func main() {
 		AlignProvider:          alignProvider,
 		AnalysisJobs:           analysisJobs,
 		AnalysisMaxUploadBytes: int64(*analysisMaxUploadMiB) << 20,
+		SeparationJobs:         separationJobs,
 	})
 	if err != nil {
 		log.Fatalf("audio server: %v", err)

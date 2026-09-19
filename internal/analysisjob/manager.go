@@ -34,8 +34,16 @@ type Request struct {
 	IncludeSpeakerEmbeddings bool
 	Transcribe               bool
 	TranscriptionModel       string
+	DiarizationModel         string
 	Language                 string
 	SeparateDialogue         bool
+	SeparationModel          string
+
+	// NumSpeakers/MinSpeakers/MaxSpeakers are optional cast-size hints for
+	// diarizers that support constraining cluster count (e.g. pyannote).
+	NumSpeakers int
+	MinSpeakers int
+	MaxSpeakers int
 }
 
 type Segment struct {
@@ -77,9 +85,11 @@ type Job struct {
 }
 
 type Config struct {
-	Diarizer           analysisprovider.Diarizer
+	Diarizers          map[string]analysisprovider.Diarizer
+	DefaultDiarizer    string
 	Embedder           analysisprovider.Embedder
-	Separator          analysisprovider.Separator
+	Separators         map[string]analysisprovider.Separator
+	DefaultSeparator   string
 	AudioNormalizer    sttprovider.AudioNormalizer
 	Transcribers       map[string]sttprovider.Provider
 	DefaultTranscriber string
@@ -90,9 +100,11 @@ type Config struct {
 type Manager struct {
 	mu                 sync.RWMutex
 	jobs               map[string]*Job
-	diarizer           analysisprovider.Diarizer
+	diarizers          map[string]analysisprovider.Diarizer
+	defaultDiarizer    string
 	embedder           analysisprovider.Embedder
-	separator          analysisprovider.Separator
+	separators         map[string]analysisprovider.Separator
+	defaultSeparator   string
 	audioNormalizer    sttprovider.AudioNormalizer
 	transcribers       map[string]sttprovider.Provider
 	defaultTranscriber string
@@ -102,20 +114,36 @@ type Manager struct {
 
 func New(cfg Config) *Manager {
 	return &Manager{
-		jobs: make(map[string]*Job), diarizer: cfg.Diarizer, embedder: cfg.Embedder,
-		separator: cfg.Separator, audioNormalizer: cfg.AudioNormalizer,
-		transcribers: cfg.Transcribers, defaultTranscriber: cfg.DefaultTranscriber,
-		runGate: cfg.RunGate, timeout: cfg.Timeout,
+		jobs: make(map[string]*Job), diarizers: cfg.Diarizers, defaultDiarizer: cfg.DefaultDiarizer,
+		embedder: cfg.Embedder, separators: cfg.Separators, defaultSeparator: cfg.DefaultSeparator,
+		audioNormalizer: cfg.AudioNormalizer,
+		transcribers:    cfg.Transcribers, defaultTranscriber: cfg.DefaultTranscriber,
+		runGate:         cfg.RunGate, timeout: cfg.Timeout,
 	}
 }
 
-func (m *Manager) Enabled() bool { return m != nil && m.diarizer != nil }
+func (m *Manager) Enabled() bool { return m != nil && len(m.diarizers) > 0 }
 
+// DiarizerID reports the default diarizer's id, for callers (e.g. discovery
+// endpoints) that don't care about per-job selection.
 func (m *Manager) DiarizerID() string {
 	if !m.Enabled() {
 		return ""
 	}
-	return m.diarizer.ID()
+	if d, ok := m.diarizers[m.defaultDiarizer]; ok {
+		return d.ID()
+	}
+	return ""
+}
+
+// DiarizerIDs reports every selectable diarization model id.
+func (m *Manager) DiarizerIDs() []string {
+	ids := make([]string, 0, len(m.diarizers))
+	for id := range m.diarizers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func (m *Manager) EmbedderID() string {
@@ -125,11 +153,29 @@ func (m *Manager) EmbedderID() string {
 	return m.embedder.ID()
 }
 
+// SeparatorID reports the default separator's id, for callers (e.g.
+// discovery endpoints) that don't care about per-job selection.
 func (m *Manager) SeparatorID() string {
-	if m == nil || m.separator == nil {
+	if m == nil {
 		return ""
 	}
-	return m.separator.ID()
+	if s, ok := m.separators[m.defaultSeparator]; ok {
+		return s.ID()
+	}
+	return ""
+}
+
+// SeparatorIDs reports every selectable dialogue-separation model id.
+func (m *Manager) SeparatorIDs() []string {
+	if m == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(m.separators))
+	for id := range m.separators {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func (m *Manager) Submit(req Request) (*Job, error) {
@@ -148,6 +194,24 @@ func (m *Manager) Submit(req Request) (*Job, error) {
 			return nil, fmt.Errorf("unknown analysis transcription model %q", req.TranscriptionModel)
 		}
 		req.TranscriptionModel = model
+	}
+	diarModel := req.DiarizationModel
+	if diarModel == "" || diarModel == "auto" {
+		diarModel = m.defaultDiarizer
+	}
+	if _, ok := m.diarizers[diarModel]; !ok {
+		return nil, fmt.Errorf("unknown analysis diarization model %q", req.DiarizationModel)
+	}
+	req.DiarizationModel = diarModel
+	if req.SeparateDialogue {
+		sepModel := req.SeparationModel
+		if sepModel == "" || sepModel == "auto" {
+			sepModel = m.defaultSeparator
+		}
+		if _, ok := m.separators[sepModel]; !ok {
+			return nil, fmt.Errorf("unknown analysis separation model %q", req.SeparationModel)
+		}
+		req.SeparationModel = sepModel
 	}
 	id, err := newID()
 	if err != nil {
@@ -202,8 +266,9 @@ func (m *Manager) analyze(ctx context.Context, req Request) (Result, error) {
 	}
 	separatorID := ""
 	if req.SeparateDialogue {
-		if m.separator == nil {
-			return Result{}, errors.New("dialogue separation is not configured")
+		separator, ok := m.separators[req.SeparationModel]
+		if !ok {
+			return Result{}, fmt.Errorf("unknown analysis separation model %q", req.SeparationModel)
 		}
 		separationInput, err := m.audioNormalizer.NormalizeAudio(ctx, req.Audio, sttprovider.AudioFormat{
 			Container: "wav", Codec: "pcm_s16le", SampleRate: 44100, Channels: 2,
@@ -213,7 +278,7 @@ func (m *Manager) analyze(ctx context.Context, req Request) (Result, error) {
 		}
 		var release func()
 		if m.runGate != nil {
-			release, err = m.runGate(m.separator.ID())
+			release, err = m.runGate(separator.ID())
 			if err != nil {
 				return Result{}, fmt.Errorf("acquire dialogue separation model: %w", err)
 			}
@@ -225,7 +290,7 @@ func (m *Manager) analyze(ctx context.Context, req Request) (Result, error) {
 				}
 			}()
 		}
-		separated, err := m.separator.Separate(ctx, analysisprovider.AudioRequest{Audio: separationInput.Audio, Filename: req.Filename})
+		separated, err := separator.Separate(ctx, analysisprovider.AudioRequest{Audio: separationInput.Audio, Filename: req.Filename})
 		if err != nil {
 			return Result{}, err
 		}
@@ -262,9 +327,13 @@ func (m *Manager) analyze(ctx context.Context, req Request) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("parse normalized audio: %w", err)
 	}
+	diarizer, ok := m.diarizers[req.DiarizationModel]
+	if !ok {
+		return Result{}, fmt.Errorf("unknown analysis diarization model %q", req.DiarizationModel)
+	}
 	var release func()
 	if m.runGate != nil {
-		release, err = m.runGate(m.diarizer.ID())
+		release, err = m.runGate(diarizer.ID())
 		if err != nil {
 			return Result{}, fmt.Errorf("acquire diarization model: %w", err)
 		}
@@ -276,7 +345,10 @@ func (m *Manager) analyze(ctx context.Context, req Request) (Result, error) {
 			}
 		}()
 	}
-	diar, err := m.diarizer.Diarize(ctx, analysisprovider.AudioRequest{Audio: req.Audio, Filename: req.Filename})
+	diar, err := diarizer.Diarize(ctx, analysisprovider.AudioRequest{
+		Audio: req.Audio, Filename: req.Filename,
+		NumSpeakers: req.NumSpeakers, MinSpeakers: req.MinSpeakers, MaxSpeakers: req.MaxSpeakers,
+	})
 	if err != nil {
 		return Result{}, err
 	}
@@ -311,7 +383,19 @@ func (m *Manager) analyze(ctx context.Context, req Request) (Result, error) {
 	for _, id := range ids {
 		samples := speakerSamples[id]
 		speaker := Speaker{ID: id, SpeechMS: int64(len(samples)) * 1000 / int64(audio.SampleRate)}
-		if req.IncludeSpeakerEmbeddings && m.embedder != nil && len(samples) >= audio.SampleRate/4 {
+		switch {
+		case !req.IncludeSpeakerEmbeddings:
+			// no embedding requested
+		case len(diar.SpeakerEmbeddings) > 0:
+			// The diarizer already computed embeddings as part of its
+			// whole-clip pass (e.g. pyannote); reuse them instead of running
+			// a separate embedding provider over reconstructed samples.
+			if emb, ok := diar.SpeakerEmbeddings[id]; ok {
+				speaker.EmbeddingModel = diar.EmbeddingModel
+				speaker.Embedding = emb
+				result.Embedder = diar.ProviderID
+			}
+		case m.embedder != nil && len(samples) >= audio.SampleRate/4:
 			wav, encodeErr := pcmwav.Encode(pcmwav.Audio{SampleRate: audio.SampleRate, Samples: samples})
 			if encodeErr != nil {
 				return Result{}, encodeErr

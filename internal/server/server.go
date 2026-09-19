@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -25,6 +26,7 @@ import (
 	"github.com/dleiferives/audio-server/internal/apidocs"
 	"github.com/dleiferives/audio-server/internal/provider"
 	"github.com/dleiferives/audio-server/internal/queue"
+	"github.com/dleiferives/audio-server/internal/separationjob"
 	"github.com/dleiferives/audio-server/internal/store"
 	"github.com/dleiferives/audio-server/internal/sttjob"
 	"github.com/dleiferives/audio-server/internal/sttprovider"
@@ -78,6 +80,11 @@ type Config struct {
 	// AnalysisJobs runs asynchronous diarization and speaker-embedding work.
 	AnalysisJobs           *analysisjob.Manager
 	AnalysisMaxUploadBytes int64
+
+	// SeparationJobs runs asynchronous stem-separation work and persists the
+	// resulting stems for retrieval, unlike AnalysisJobs's internal use of a
+	// separator (which consumes one stem and discards the rest).
+	SeparationJobs *separationjob.Manager
 }
 
 // Aligner wraps the MFA-go alignment provider.
@@ -85,6 +92,10 @@ type Aligner interface {
 	Align(ctx context.Context, audio []byte, transcript, language string) (any, error)
 	Languages() []string
 	HasLanguage(language string) bool
+}
+
+type batchAligner interface {
+	AlignBatch(ctx context.Context, audio [][]byte, transcripts, ids []string, language string) (any, error)
 }
 
 type Server struct {
@@ -105,8 +116,10 @@ type Server struct {
 	webDir                 string
 	audioStore             *store.Store
 	alignProvider          Aligner
+	alignMu                sync.Mutex
 	analysisJobs           *analysisjob.Manager
 	analysisMaxUploadBytes int64
+	separationJobs         *separationjob.Manager
 }
 
 func New(cfg Config) (*Server, error) {
@@ -194,6 +207,7 @@ func New(cfg Config) (*Server, error) {
 		alignProvider:          cfg.AlignProvider,
 		analysisJobs:           cfg.AnalysisJobs,
 		analysisMaxUploadBytes: cfg.AnalysisMaxUploadBytes,
+		separationJobs:         cfg.SeparationJobs,
 	}, nil
 }
 
@@ -216,8 +230,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/audio/analysis-jobs", s.auth(s.createAnalysisJob))
 	mux.HandleFunc("GET /v1/audio/analysis-jobs/{id}", s.auth(s.getAnalysisJob))
 	mux.HandleFunc("GET /v1/audio/analysis-jobs/{id}/result", s.auth(s.getAnalysisResult))
+	mux.HandleFunc("POST /v1/audio/separations", s.auth(s.createSeparationJob))
+	mux.HandleFunc("GET /v1/audio/separations/{id}", s.auth(s.getSeparationJob))
+	mux.HandleFunc("GET /v1/audio/separations/{id}/stems/{stem}", s.auth(s.getSeparationStem))
 	if s.alignProvider != nil {
 		mux.HandleFunc("POST /v1/audio/alignments", s.auth(s.createAlignJob))
+		mux.HandleFunc("POST /v1/audio/alignments/batch", s.auth(s.createAlignBatchJob))
 		mux.HandleFunc("GET /v1/audio/alignments/{id}", s.auth(s.getAlignJob))
 		mux.HandleFunc("GET /v1/audio/alignments/{id}/result", s.auth(s.getAlignResult))
 		mux.HandleFunc("GET /v1/audio/alignments/models", s.auth(s.listAlignLanguages))
@@ -281,11 +299,28 @@ func (s *Server) createAnalysisJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, errors.New("audio normalization is not configured"))
 		return
 	}
+	numSpeakers, err := formPositiveInt(r, "num_speakers")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	minSpeakers, err := formPositiveInt(r, "min_speakers")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	maxSpeakers, err := formPositiveInt(r, "max_speakers")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	job, err := s.analysisJobs.Submit(analysisjob.Request{
 		Audio: audio, Filename: header.Filename,
 		IncludeSpeakerEmbeddings: includeEmbeddings,
 		Transcribe:               transcribe, TranscriptionModel: r.FormValue("transcription_model"), Language: r.FormValue("language"),
+		DiarizationModel: r.FormValue("diarization_model"),
 		SeparateDialogue: separateDialogue,
+		NumSpeakers:      numSpeakers, MinSpeakers: minSpeakers, MaxSpeakers: maxSpeakers,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -351,6 +386,124 @@ func (s *Server) getAnalysisResult(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, http.StatusAccepted, map[string]any{"id": job.ID, "status": job.Status})
 	}
+}
+
+func (s *Server) createSeparationJob(w http.ResponseWriter, r *http.Request) {
+	if s.separationJobs == nil || !s.separationJobs.Enabled() {
+		writeError(w, http.StatusServiceUnavailable, errors.New("audio separation is not configured"))
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, s.analysisMaxUploadBytes)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("file is required"))
+		return
+	}
+	defer file.Close()
+	audio, err := io.ReadAll(file)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var stems []string
+	if raw := strings.TrimSpace(r.FormValue("stems")); raw != "" {
+		for _, s := range strings.Split(raw, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				stems = append(stems, s)
+			}
+		}
+	}
+	job, err := s.separationJobs.Submit(separationjob.Request{
+		Audio: audio, Filename: header.Filename,
+		SeparationModel: r.FormValue("separation_model"),
+		Stems:           stems,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.Header().Set("Location", "/v1/audio/separations/"+job.ID)
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"id": job.ID, "status": job.Status,
+		"status_url": "/v1/audio/separations/" + job.ID,
+	})
+}
+
+func (s *Server) getSeparationJob(w http.ResponseWriter, r *http.Request) {
+	if s.separationJobs == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("audio separation is not configured"))
+		return
+	}
+	job, err := s.separationJobs.Get(r.PathValue("id"))
+	if errors.Is(err, separationjob.ErrNotFound) {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	body := map[string]any{
+		"id": job.ID, "status": job.Status, "created_at": job.CreatedAt,
+	}
+	if !job.StartedAt.IsZero() {
+		body["started_at"] = job.StartedAt
+	}
+	if !job.FinishedAt.IsZero() {
+		body["finished_at"] = job.FinishedAt
+	}
+	if job.Err != nil {
+		body["error"] = map[string]string{"message": job.Err.Error()}
+	}
+	if job.Status == separationjob.StatusSucceeded {
+		body["separation_model"] = job.Result.ProviderID
+		stemURLs := make(map[string]string, len(job.Result.Stems))
+		for _, stem := range job.Result.Stems {
+			stemURLs[stem] = "/v1/audio/separations/" + job.ID + "/stems/" + stem
+		}
+		body["stems"] = stemURLs
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+func (s *Server) getSeparationStem(w http.ResponseWriter, r *http.Request) {
+	if s.separationJobs == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("audio separation is not configured"))
+		return
+	}
+	id := r.PathValue("id")
+	stem := r.PathValue("stem")
+	job, err := s.separationJobs.Get(id)
+	if errors.Is(err, separationjob.ErrNotFound) {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	switch job.Status {
+	case separationjob.StatusSucceeded:
+	case separationjob.StatusFailed:
+		writeError(w, http.StatusUnprocessableEntity, job.Err)
+		return
+	default:
+		writeError(w, http.StatusConflict, errors.New("separation is not finished yet"))
+		return
+	}
+	audio, err := s.separationJobs.Stem(id, stem)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	w.Header().Set("Content-Type", "audio/wav")
+	w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(audio)
 }
 
 var liveSTTUpgrader = websocket.Upgrader{
@@ -707,17 +860,26 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
 	}
 	analysisCapabilities := []map[string]any{}
 	if s.analysisJobs != nil && s.analysisJobs.Enabled() {
-		analysisCapabilities = append(analysisCapabilities, map[string]any{
-			"provider": s.analysisJobs.DiarizerID(), "tasks": []string{"diarization", "overlap_detection"},
-			"streaming": false, "max_speakers": 4,
-		})
+		for _, id := range s.analysisJobs.DiarizerIDs() {
+			capability := map[string]any{
+				"provider": id, "tasks": []string{"diarization", "overlap_detection"},
+				"streaming": false, "max_speakers": 4,
+			}
+			if id == "pyannote" {
+				// pyannote clusters across the whole clip with no fixed
+				// speaker cap and computes embeddings in the same pass.
+				capability["tasks"] = []string{"diarization", "overlap_detection", "speaker_embedding", "speaker_verification"}
+				delete(capability, "max_speakers")
+			}
+			analysisCapabilities = append(analysisCapabilities, capability)
+		}
 		if id := s.analysisJobs.EmbedderID(); id != "" {
 			analysisCapabilities = append(analysisCapabilities, map[string]any{
 				"provider": id, "tasks": []string{"speaker_embedding", "speaker_verification"},
 				"streaming": false,
 			})
 		}
-		if id := s.analysisJobs.SeparatorID(); id != "" {
+		for _, id := range s.analysisJobs.SeparatorIDs() {
 			analysisCapabilities = append(analysisCapabilities, map[string]any{
 				"provider": id, "tasks": []string{"dialogue_separation", "music_separation"},
 				"streaming": false,
@@ -1249,9 +1411,11 @@ func (s *Server) decodeMultipartSpeechRequest(w http.ResponseWriter, r *http.Req
 			return provider.SpeechRequest{}, errors.New("speaker_reference is empty")
 		}
 		req.SpeakerReferenceFilename = files[0].Filename
-		if strings.TrimSpace(req.SpeakerReferenceText) == "" {
-			return provider.SpeechRequest{}, errors.New("speaker_reference_text is required with speaker_reference")
-		}
+		// Whether speaker_reference_text is required alongside
+		// speaker_reference is provider-specific (OmniVoice and CosyVoice2
+		// need a matching transcript; Chatterbox clones from audio alone),
+		// so each provider's Synthesize validates this itself rather than
+		// enforcing one rule here for all of them.
 	}
 	return req, nil
 }
@@ -1635,6 +1799,21 @@ func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
 }
 
+// formPositiveInt parses an optional positive-integer form field. A blank
+// field returns 0 (unset); anything else that doesn't parse to a positive
+// integer is an error.
+func formPositiveInt(r *http.Request, field string) (int, error) {
+	raw := strings.TrimSpace(r.FormValue(field))
+	if raw == "" {
+		return 0, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", field)
+	}
+	return value, nil
+}
+
 // ── alignment endpoints (active when AlignProvider is configured) ──
 
 func (s *Server) createAlignJob(w http.ResponseWriter, r *http.Request) {
@@ -1671,19 +1850,105 @@ func (s *Server) createAlignJob(w http.ResponseWriter, r *http.Request) {
 
 	job := s.queue.NewRunningJob("align", provider.SpeechRequest{Input: transcript})
 	go func() {
+		s.alignMu.Lock()
+		defer s.alignMu.Unlock()
 		result, err := s.alignProvider.Align(context.Background(), audio, transcript, language)
 		if err != nil {
 			s.queue.FailJob(job.ID, err)
 			return
+		}
+		if result != nil {
+			s.queue.SetAlignResult(job.ID, result)
 		}
 		s.queue.CompleteJob(job.ID, provider.SpeechResult{
 			Model:      "align/" + language,
 			ProviderID: "align",
 			Voice:      language,
 		})
-		if result != nil {
-			s.queue.SetAlignResult(job.ID, result)
+	}()
+	writeJSON(w, http.StatusAccepted, s.jobStatusBody(job.ID))
+}
+
+type alignmentBatchManifest struct {
+	Language string                       `json:"language"`
+	Items    []alignmentBatchManifestItem `json:"items"`
+}
+
+type alignmentBatchManifestItem struct {
+	ID         string `json:"id"`
+	Transcript string `json:"transcript"`
+}
+
+func (s *Server) createAlignBatchJob(w http.ResponseWriter, r *http.Request) {
+	aligner, ok := s.alignProvider.(batchAligner)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, errors.New("batch alignment is not configured"))
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, int64(s.maxUploadBytes))
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	defer r.MultipartForm.RemoveAll()
+	var manifest alignmentBatchManifest
+	if err := json.Unmarshal([]byte(r.FormValue("manifest")), &manifest); err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("valid alignment manifest is required"))
+		return
+	}
+	if !s.alignProvider.HasLanguage(manifest.Language) {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("unsupported language: %s", manifest.Language))
+		return
+	}
+	files := r.MultipartForm.File["file"]
+	if len(manifest.Items) == 0 || len(files) != len(manifest.Items) {
+		writeError(w, http.StatusBadRequest, errors.New("manifest items and audio files must have the same non-zero length"))
+		return
+	}
+	audio := make([][]byte, len(files))
+	transcripts := make([]string, len(files))
+	ids := make([]string, len(files))
+	seen := make(map[string]struct{}, len(files))
+	for i, item := range manifest.Items {
+		item.ID = strings.TrimSpace(item.ID)
+		item.Transcript = strings.TrimSpace(item.Transcript)
+		if item.ID == "" || item.Transcript == "" {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("manifest item %d requires id and transcript", i))
+			return
 		}
+		if _, exists := seen[item.ID]; exists {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("duplicate alignment id %q", item.ID))
+			return
+		}
+		seen[item.ID] = struct{}{}
+		file, err := files[i].Open()
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		audio[i], err = io.ReadAll(file)
+		_ = file.Close()
+		if err != nil || len(audio[i]) == 0 {
+			writeError(w, http.StatusBadRequest, errors.New("alignment audio file is empty or unreadable"))
+			return
+		}
+		ids[i] = item.ID
+		transcripts[i] = item.Transcript
+	}
+
+	job := s.queue.NewRunningJob("align-batch", provider.SpeechRequest{Input: fmt.Sprintf("%d items", len(ids))})
+	go func() {
+		s.alignMu.Lock()
+		defer s.alignMu.Unlock()
+		result, err := aligner.AlignBatch(context.Background(), audio, transcripts, ids, manifest.Language)
+		if err != nil {
+			s.queue.FailJob(job.ID, err)
+			return
+		}
+		s.queue.SetAlignResult(job.ID, result)
+		s.queue.CompleteJob(job.ID, provider.SpeechResult{
+			Model: "align-batch/" + manifest.Language, ProviderID: "align-batch", Voice: manifest.Language,
+		})
 	}()
 	writeJSON(w, http.StatusAccepted, s.jobStatusBody(job.ID))
 }

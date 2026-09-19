@@ -1,0 +1,10 @@
+[project]
+name = "audio-server-pyannote-env"
+version = "0.1.0"
+description = "Python env for the pyannote.audio diarization sidecar (server.py)"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "torch>=2.2",
+    "pyannote.audio>=4.0",
+    "soundfile>=0.12",
+]

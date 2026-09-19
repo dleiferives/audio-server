@@ -1,0 +1,13 @@
+[project]
+name = "audio-server-chatterbox-env"
+version = "0.1.0"
+description = "Python env for the Chatterbox voice-cloning TTS sidecar (server.py)"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "torch>=2.2",
+    "torchaudio>=2.2",
+    "chatterbox-tts",
+    # setuptools>=81 dropped pkg_resources, which resemble-perth (a
+    # chatterbox-tts dep) still imports at runtime.
+    "setuptools<81",
+]
