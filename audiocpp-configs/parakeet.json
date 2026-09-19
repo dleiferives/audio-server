@@ -10,7 +10,7 @@
     {
       "id": "parakeet",
       "family": "parakeet_tdt",
-      "path": "../models/Parakeet-TDT-0.6B-v3-GGUF/parakeet-tdt-0.6b-v3-q8_0.gguf",
+      "path": "../audio.cpp/models/Parakeet-TDT-0.6B-v3-GGUF/parakeet-tdt-0.6b-v3-q8_0.gguf",
       "task": "asr",
       "mode": "streaming",
       "session_options": {
