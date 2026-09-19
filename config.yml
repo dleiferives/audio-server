@@ -46,10 +46,10 @@ model_vram_mib:                # conservative residency estimates; tune per GPU/
   bs-roformer: 2048
 
 # ── STT ──
-stt_enabled: false
-default_stt_provider: ""
-parakeet_enabled: false
-parakeet_addr: ""
+stt_enabled: true
+default_stt_provider: "parakeet"
+parakeet_enabled: true
+parakeet_addr: "http://127.0.0.1:8026"
 nemotron_addr: ""
 qwen3_asr_0_6b_enabled: false
 qwen3_asr_0_6b_addr: "http://127.0.0.1:8027"
