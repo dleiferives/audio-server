@@ -30,6 +30,7 @@ import (
 	"github.com/dleiferives/audio-server/internal/provider/htdemucs"
 	"github.com/dleiferives/audio-server/internal/provider/htdemucsdnr"
 	"github.com/dleiferives/audio-server/internal/provider/kokoro"
+	"github.com/dleiferives/audio-server/internal/provider/moonshine"
 	"github.com/dleiferives/audio-server/internal/provider/nemotron"
 	"github.com/dleiferives/audio-server/internal/provider/omnivoice"
 	"github.com/dleiferives/audio-server/internal/provider/parakeet"
@@ -97,6 +98,15 @@ type configFile struct {
 	FasterWhisperModelSize    string         `yaml:"faster_whisper_model_size"`
 	FasterWhisperDevice       string         `yaml:"faster_whisper_device"`
 	FasterWhisperComputeType  string         `yaml:"faster_whisper_compute_type"`
+	MoonshineEnabled          bool           `yaml:"moonshine_enabled"`
+	MoonshineAddr             string         `yaml:"moonshine_addr"`
+	MoonshinePort             int            `yaml:"moonshine_port"`
+	MoonshinePython           string         `yaml:"moonshine_python"`
+	MoonshineScript           string         `yaml:"moonshine_script"`
+	MoonshineLanguage         string         `yaml:"moonshine_language"`
+	MoonshineModelArch        string         `yaml:"moonshine_model_arch"`
+	MoonshineUpdateInterval   float64        `yaml:"moonshine_update_interval"`
+	MoonshineThreads          int            `yaml:"moonshine_threads"`
 	STTEnabled                bool           `yaml:"stt_enabled"`
 	DefaultSttProvider        string         `yaml:"default_stt_provider"`
 	ParakeetEnabled           bool           `yaml:"parakeet_enabled"`
@@ -213,6 +223,15 @@ func main() {
 	fasterWhisperModelSize := flag.String("faster-whisper-model-size", env("AUDIO_FASTERWHISPER_MODEL_SIZE", valueOr(cfg.FasterWhisperModelSize, "small")), "faster-whisper model size")
 	fasterWhisperDevice := flag.String("faster-whisper-device", env("AUDIO_FASTERWHISPER_DEVICE", valueOr(cfg.FasterWhisperDevice, "auto")), "faster-whisper inference device")
 	fasterWhisperComputeType := flag.String("faster-whisper-compute-type", env("AUDIO_FASTERWHISPER_COMPUTE_TYPE", valueOr(cfg.FasterWhisperComputeType, "default")), "faster-whisper compute type")
+	moonshineEnabled := flag.Bool("moonshine-enabled", cfg.MoonshineEnabled, "enable the CPU-only Moonshine v2 streaming STT provider")
+	moonshineAddr := flag.String("moonshine-addr", env("AUDIO_MOONSHINE_ADDR", valueOr(cfg.MoonshineAddr, "http://127.0.0.1:8042")), "Moonshine sidecar base URL")
+	moonshinePort := flag.Int("moonshine-port", envInt("AUDIO_MOONSHINE_PORT", intOr(cfg.MoonshinePort, 8042)), "local Moonshine sidecar port")
+	moonshinePython := flag.String("moonshine-python", env("AUDIO_MOONSHINE_PYTHON", valueOr(cfg.MoonshinePython, "python3")), "Python executable for the Moonshine sidecar")
+	moonshineScript := flag.String("moonshine-script", env("AUDIO_MOONSHINE_SCRIPT", valueOr(cfg.MoonshineScript, "stt/moonshine/server.py")), "path to the Moonshine sidecar script")
+	moonshineLanguage := flag.String("moonshine-language", env("AUDIO_MOONSHINE_LANGUAGE", valueOr(cfg.MoonshineLanguage, "en")), "default Moonshine language; one model is published per language")
+	moonshineModelArch := flag.String("moonshine-model-arch", env("AUDIO_MOONSHINE_MODEL_ARCH", valueOr(cfg.MoonshineModelArch, "MEDIUM_STREAMING")), "Moonshine ModelArch name (MEDIUM_STREAMING, SMALL_STREAMING, TINY_STREAMING)")
+	moonshineUpdateInterval := flag.Float64("moonshine-update-interval", cfg.MoonshineUpdateInterval, "seconds between Moonshine streaming transcript refreshes")
+	moonshineThreads := flag.Int("moonshine-threads", envInt("AUDIO_MOONSHINE_THREADS", cfg.MoonshineThreads), "ONNX Runtime intra-op threads for Moonshine; 0 uses all physical cores")
 	sttEnabled := flag.Bool("stt-enabled", cfg.STTEnabled, "enable audio.cpp STT providers")
 	defaultSttProvider := flag.String("default-stt-provider", env("AUDIO_DEFAULT_STT_PROVIDER", cfg.DefaultSttProvider), "provider used for auto, whisper-1, and blank transcription models")
 	parakeetEnabled := flag.Bool("parakeet-enabled", cfg.ParakeetEnabled, "enable Parakeet-TDT ASR provider")
@@ -280,7 +299,7 @@ func main() {
 	workers := map[string]int{espeakProvider.ID(): *maxConcurrency}
 
 	var gpuLifecycle *lifecycle.Manager
-	if strings.TrimSpace(*audiocppBin) != "" || *fasterWhisperEnabled || *transcribecppEnabled || *voxtralRealtimeEnabled || *analysisEnabled || *chatterboxEnabled || *cosyvoiceEnabled {
+	if strings.TrimSpace(*audiocppBin) != "" || *fasterWhisperEnabled || *transcribecppEnabled || *voxtralRealtimeEnabled || *analysisEnabled || *chatterboxEnabled || *cosyvoiceEnabled || *moonshineEnabled {
 		maxVRAMMiB, err := resolveVRAMLimit(*maxVRAM)
 		if err != nil {
 			log.Fatalf("GPU VRAM configuration: %v", err)
@@ -374,6 +393,29 @@ func main() {
 				strings.TrimRight(*fasterWhisperAddr, "/")+"/health",
 				idleDelay,
 				modelVRAM(cfg.ModelVRAMMiB, "faster-whisper", 6000),
+			)
+		}
+		if *moonshineEnabled && strings.TrimSpace(*moonshinePython) != "" && strings.TrimSpace(*moonshineScript) != "" {
+			args := []string{
+				*moonshineScript,
+				"--host", "127.0.0.1",
+				"--port", strconv.Itoa(*moonshinePort),
+				"--language", *moonshineLanguage,
+				"--model-arch", *moonshineModelArch,
+			}
+			if *moonshineUpdateInterval > 0 {
+				args = append(args, "--update-interval", strconv.FormatFloat(*moonshineUpdateInterval, 'f', -1, 64))
+			}
+			if *moonshineThreads > 0 {
+				args = append(args, "--threads", strconv.Itoa(*moonshineThreads))
+			}
+			// Moonshine runs on the CPU, so it is registered with a zero VRAM
+			// cost: it never counts against the residency budget and is never
+			// evicted to make room for a GPU model. The sidecar runs its own
+			// idle-unload timer instead of being driven from here.
+			gpuLifecycle.RegisterCommandModel(
+				"moonshine", *moonshinePython, args,
+				strings.TrimRight(*moonshineAddr, "/")+"/health", 0, 0,
 			)
 		}
 		if *sttEnabled && *transcribecppEnabled && strings.TrimSpace(*transcribecppBin) != "" && strings.TrimSpace(*transcribecppModel) != "" {
@@ -524,6 +566,13 @@ func main() {
 			fw.StartFunc = func() error { return gpuLifecycle.Start("faster-whisper", false) }
 		}
 		sttProviders = append(sttProviders, fw)
+	}
+	if *moonshineEnabled {
+		ms := moonshine.New(*moonshineAddr, nil)
+		if gpuLifecycle != nil && gpuLifecycle.Has("moonshine") {
+			ms.StartFunc = func() error { return gpuLifecycle.Start("moonshine", false) }
+		}
+		sttProviders = append(sttProviders, ms)
 	}
 	if *sttEnabled && strings.TrimSpace(*nemotronAddr) != "" {
 		nm := nemotron.New(*nemotronAddr, nil)

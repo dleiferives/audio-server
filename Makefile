@@ -56,7 +56,9 @@ VOXTRAL_MODEL := models/Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf
 VOXTRAL_MODEL_URL := https://huggingface.co/handy-computer/Voxtral-Mini-4B-Realtime-2602-gguf/resolve/main/Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf
 CUDA_HOME ?= /usr/local/cuda
 
-.PHONY: build build-audiocpp build-transcribecpp build-wespeaker download-cohere download-omnivoice download-voxtral download-wespeaker download-sortformer download-bs-roformer download-htdemucs run stop clean
+MOONSHINE_VENV := stt/moonshine/.venv
+
+.PHONY: build build-audiocpp build-transcribecpp build-wespeaker download-cohere download-omnivoice download-voxtral download-wespeaker download-sortformer download-bs-roformer download-htdemucs setup-moonshine run run-cpu stop clean
 
 build:
 	@echo "  → building $(BIN)"
@@ -83,6 +85,31 @@ download-bs-roformer: $(BS_ROFORMER_MODEL)
 download-htdemucs: $(HTDEMUCS_MODEL)
 
 download-omnivoice: $(OMNIVOICE_MODEL)
+
+setup-moonshine: $(MOONSHINE_VENV)
+
+# CPU-only Moonshine v2 env. Model weights are not fetched here; the sidecar
+# downloads and caches them on first use, per language.
+$(MOONSHINE_VENV):
+	@echo "  → creating $(MOONSHINE_VENV)"
+	@command -v uv >/dev/null 2>&1 || { \
+		echo "uv not found; install it from https://docs.astral.sh/uv/" >&2; \
+		exit 1; \
+	}
+	uv venv --python 3.12 $(MOONSHINE_VENV)
+	uv pip install --python $(MOONSHINE_VENV)/bin/python -r stt/moonshine/pyproject.toml
+	@echo "  → moonshine env ready"
+
+# Run against the gitignored personal config, which keeps everything off the GPU.
+run-cpu: build setup-moonshine
+	@test -f config.local.yml || { \
+		echo "config.local.yml not found; copy one from config.yml" >&2; \
+		exit 1; \
+	}
+	@mkdir -p $(PIDIR)
+	@fuser -k $(SERVER_PORT)/tcp 2>/dev/null && sleep 0.5 || true
+	@fuser -k 8042/tcp 2>/dev/null && sleep 0.5 || true
+	$(BIN) --config=config.local.yml
 
 $(AUDIOCPP_SENTINEL):
 	@echo "  → building audiocpp_server (one-time, ~5-10 min)..."

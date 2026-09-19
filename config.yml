@@ -143,3 +143,20 @@ faster_whisper_port: 8030
 faster_whisper_model_size: "large-v3"
 faster_whisper_device: "cuda"
 faster_whisper_compute_type: "int8"
+
+# ── Moonshine v2 (CPU only, streaming) ──
+# The moonshine-voice pip package, not the GGUF model audio.cpp serves. It runs
+# entirely on the CPU, so it carries no model_vram_mib entry and is never
+# evicted by the residency budget. Moonshine publishes one model per language;
+# moonshine_language picks the default and a request's language overrides it.
+# There is no BASE_STREAMING arch: the choices are MEDIUM/SMALL/TINY_STREAMING,
+# and MEDIUM measures both faster and more accurate than SMALL on CPU.
+moonshine_enabled: true
+moonshine_addr: "http://127.0.0.1:8042"
+moonshine_port: 8042
+moonshine_python: "stt/moonshine/.venv/bin/python"
+moonshine_script: "stt/moonshine/server.py"
+moonshine_language: "en"
+moonshine_model_arch: "MEDIUM_STREAMING"
+moonshine_update_interval: 0.5  # seconds between streaming transcript refreshes
+moonshine_threads: 0            # 0 = all physical cores

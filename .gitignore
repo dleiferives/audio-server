@@ -22,3 +22,7 @@ __pycache__/
 
 # local secrets (never commit)
 .env.local
+
+# personal machine configs, passed with --config=<file>
+/config.local.yml
+/config.*.local.yml

@@ -1,0 +1,12 @@
+[project]
+name = "audio-server-moonshine-env"
+version = "0.1.0"
+description = "Python env for the CPU-only Moonshine v2 streaming STT sidecar (server.py)"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    # Moonshine v2. Ships libmoonshine.so over ONNX Runtime and needs no torch;
+    # the [finetune]/[lora] extras are the ones that would pull it in, so they
+    # are deliberately omitted.
+    "moonshine-voice>=0.1.5",
+    "numpy>=1.24",
+]

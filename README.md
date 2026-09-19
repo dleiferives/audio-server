@@ -14,6 +14,7 @@ A standalone audio manager service for TTS and STT. Exposes OpenAI-compatible sp
 | `parakeet` | audio.cpp sidecar (STT, native CUDA/CPU) | shipped |
 | `nemotron` | audio.cpp sidecar (streaming-capable STT, native CUDA/CPU) | shipped |
 | `faster-whisper` | HTTP sidecar (STT, Python / GPU or CPU) | shipped, requires `AUDIO_FASTERWHISPER_ADDR` |
+| `moonshine` | HTTP sidecar (true streaming STT, Python / CPU only) | shipped, `make setup-moonshine` |
 | `sortformer` | audio.cpp sidecar (speaker diarization, native CUDA/CPU) | shipped |
 | `wespeaker` | official C++ ONNX runtime (speaker embeddings, CPU) | shipped |
 | `bs-roformer` | audio.cpp sidecar (dialogue/background separation, native CUDA/CPU) | shipped |
@@ -32,6 +33,22 @@ brew install espeak-ng ffmpeg
 
 ```bash
 go run ./cmd/audio
+```
+
+`config.yml` is the tracked reference configuration. For machine-specific
+settings, keep your own gitignored file and pass it with `--config` (or
+`AUDIO_CONFIG`) rather than editing the tracked one:
+
+```bash
+./bin/audio-server --config=config.local.yml
+```
+
+`config.local.yml` and `config.*.local.yml` are gitignored. A CPU-only profile —
+every CUDA sidecar off, Moonshine v2 as the only STT provider — is useful when
+the GPU is busy with other work:
+
+```bash
+make run-cpu        # builds, sets up the Moonshine env, runs config.local.yml
 ```
 
 Open the self-contained interactive API reference at

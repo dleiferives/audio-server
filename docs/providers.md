@@ -237,9 +237,40 @@ Providers with a strict input format implement
 the server uses the shared ffmpeg normalizer to decode the upload and produce
 the declared sample rate, channels, codec, and container. Already-conforming
 PCM WAV input is passed through without invoking ffmpeg. Parakeet, Nemotron,
-Qwen3-ASR, and transcribe.cpp currently declare mono 16 kHz PCM WAV; faster-whisper accepts the
+Qwen3-ASR, Moonshine, and transcribe.cpp currently declare mono 16 kHz PCM WAV; faster-whisper accepts the
 original upload directly. Invalid or undecodable input returns `400` before a
 provider is started.
+
+### Moonshine (CPU only)
+
+**ID:** `moonshine`
+
+**Package:** `internal/provider/moonshine`
+
+**Runtime:** `stt/moonshine/server.py` on the `moonshine-voice` pip package
+(Moonshine v2). Set up with `make setup-moonshine`.
+
+The only STT provider that is CPU-only by construction. The sidecar clears
+`CUDA_VISIBLE_DEVICES` before the native library loads, and the provider is
+registered with the lifecycle manager at a **zero VRAM cost**, so it is neither
+counted against `max_vram_mib` nor evicted to make room for a GPU model. That
+also means it is the provider to use when the GPU is busy with other work; see
+`config.local.yml` for a profile that runs nothing but this and espeak-ng.
+
+Moonshine v2 genuinely streams — the encoder caches its output and part of the
+decoder state and refines the transcript as audio arrives — so it implements
+`sttprovider.LiveStreamingProvider` natively rather than replaying buffered
+results. `GET /v1/audio/transcriptions/stream?model=moonshine` reports growing
+`committed_text` with a revising `tentative_text`.
+
+Moonshine publishes **one model per language** (`ar de en es ja ko tl uk vi zh`),
+so the request language selects the model; `moonshine_language` is the default
+and switching language swaps the resident model. For English the streaming
+architectures are `MEDIUM_STREAMING` (default), `SMALL_STREAMING`, and
+`TINY_STREAMING` — there is no `BASE_STREAMING`, and `MEDIUM` measures both
+faster and more accurate than `SMALL` on CPU. Unlike Moonshine v1 there is no
+64-second input ceiling. See `stt/moonshine/README.md` for the HTTP surface and
+measurements.
 
 ### transcribe.cpp
 
