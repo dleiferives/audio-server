@@ -31,6 +31,7 @@ import json
 import os
 import sys
 import threading
+import time
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
@@ -142,6 +143,13 @@ class Engine:
         self.input_samples = 0
         self.revision = 0
         self.last_text = ""
+        # Refreshing the transcript costs far more than ingesting audio, so it
+        # is throttled to update_interval independently of how often the client
+        # sends frames. The browser worklet emits ~85 ms frames; refreshing on
+        # each one would demand several times realtime CPU and fall behind
+        # progressively for as long as someone keeps talking.
+        self.last_update_at = 0.0
+        self.last_snapshot: dict[str, Any] | None = None
 
     def is_loaded(self) -> bool:
         return self.transcriber is not None
@@ -236,6 +244,8 @@ class Engine:
             self.input_samples = 0
             self.revision = 0
             self.last_text = ""
+            self.last_update_at = 0.0
+            self.last_snapshot = None
 
     def feed(self, frames: bytes) -> dict[str, Any]:
         with self.lock:
@@ -244,13 +254,35 @@ class Engine:
             samples = pcm16_to_floats(frames)
             self.stream.add_audio(samples, SAMPLE_RATE)
             self.input_samples += len(samples)
+
+            # Ingesting audio is cheap; refreshing the transcript is not. Only
+            # refresh once per update_interval, so a chatty client cannot drive
+            # the CPU past realtime and fall behind.
+            now = time.monotonic()
+            if self.last_snapshot is not None and now - self.last_update_at < self.update_interval:
+                return self._unchanged_snapshot_locked()
+            self.last_update_at = now
             return self._update_locked(final=False)
+
+    def _unchanged_snapshot_locked(self) -> dict[str, Any]:
+        """Re-report the last transcript, with the audio counter moved on.
+
+        The Go provider only forwards an update whose `changed` flag is set, so
+        a skipped refresh costs the client nothing.
+        """
+        snapshot = dict(self.last_snapshot or {})
+        snapshot["input_ms"] = int(self.input_samples * 1000 / SAMPLE_RATE)
+        snapshot["changed"] = False
+        snapshot["final"] = False
+        return snapshot
 
     def finalize(self) -> dict[str, Any]:
         with self.lock:
             if self.stream is None:
                 raise LookupError("no live session; POST /stream/begin first")
             self.stream.stop()
+            # Always a real refresh: the last snapshot may be a throttled one.
+            self.last_update_at = time.monotonic()
             update = self._update_locked(final=True)
             self._reset_stream_locked()
             self._reset_idle_timer_locked()
@@ -286,7 +318,7 @@ class Engine:
             if line.text.strip()
         ]
 
-        return {
+        snapshot = {
             "text": text,
             "committed_text": committed,
             "tentative_text": tentative,
@@ -297,6 +329,8 @@ class Engine:
             "final": final,
             "lines": lines,
         }
+        self.last_snapshot = snapshot
+        return snapshot
 
     def reset(self) -> None:
         with self.lock:
@@ -318,6 +352,8 @@ class Engine:
         self.input_samples = 0
         self.revision = 0
         self.last_text = ""
+        self.last_update_at = 0.0
+        self.last_snapshot = None
 
 
 class Handler(BaseHTTPRequestHandler):

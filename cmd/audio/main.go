@@ -110,6 +110,8 @@ type configFile struct {
 	MoonshineModelArch        string         `yaml:"moonshine_model_arch"`
 	MoonshineUpdateInterval   float64        `yaml:"moonshine_update_interval"`
 	MoonshineThreads          int            `yaml:"moonshine_threads"`
+	MoonshineIdleUnload       *int           `yaml:"moonshine_idle_unload_seconds"`
+	MoonshinePreload          *bool          `yaml:"moonshine_preload"`
 	STTEnabled                bool           `yaml:"stt_enabled"`
 	DefaultSttProvider        string         `yaml:"default_stt_provider"`
 	ParakeetEnabled           bool           `yaml:"parakeet_enabled"`
@@ -235,6 +237,11 @@ func main() {
 	moonshineModelArch := flag.String("moonshine-model-arch", env("AUDIO_MOONSHINE_MODEL_ARCH", valueOr(cfg.MoonshineModelArch, "MEDIUM_STREAMING")), "Moonshine ModelArch name (MEDIUM_STREAMING, SMALL_STREAMING, TINY_STREAMING)")
 	moonshineUpdateInterval := flag.Float64("moonshine-update-interval", cfg.MoonshineUpdateInterval, "seconds between Moonshine streaming transcript refreshes")
 	moonshineThreads := flag.Int("moonshine-threads", envInt("AUDIO_MOONSHINE_THREADS", cfg.MoonshineThreads), "ONNX Runtime intra-op threads for Moonshine; 0 uses all physical cores")
+	// Default to keeping the model resident and warming it at startup. Moonshine
+	// costs no VRAM, so the only price is RAM, and reloading it costs about a
+	// second on the first utterance after a pause.
+	moonshineIdleUnload := flag.Int("moonshine-idle-unload-seconds", intFromPtr(cfg.MoonshineIdleUnload, 0), "unload the Moonshine model after this many idle seconds; 0 keeps it resident")
+	moonshinePreload := flag.Bool("moonshine-preload", boolFromPtr(cfg.MoonshinePreload, true), "load the Moonshine model at sidecar startup instead of on first request")
 	sttEnabled := flag.Bool("stt-enabled", cfg.STTEnabled, "enable audio.cpp STT providers")
 	defaultSttProvider := flag.String("default-stt-provider", env("AUDIO_DEFAULT_STT_PROVIDER", cfg.DefaultSttProvider), "provider used for auto, whisper-1, and blank transcription models")
 	parakeetEnabled := flag.Bool("parakeet-enabled", cfg.ParakeetEnabled, "enable Parakeet-TDT ASR provider")
@@ -413,6 +420,10 @@ func main() {
 			}
 			if *moonshineThreads > 0 {
 				args = append(args, "--threads", strconv.Itoa(*moonshineThreads))
+			}
+			args = append(args, "--idle-unload-seconds", strconv.Itoa(*moonshineIdleUnload))
+			if *moonshinePreload {
+				args = append(args, "--preload")
 			}
 			// Moonshine runs on the CPU, so it is registered with a zero VRAM
 			// cost: it never counts against the residency budget and is never
@@ -615,6 +626,22 @@ func main() {
 			vx.StartFunc = func() error { return gpuLifecycle.Start("voxtral-realtime", false) }
 		}
 		sttProviders = append(sttProviders, vx)
+	}
+
+	// Start the CPU sidecar eagerly rather than on the first request. Otherwise
+	// --preload cannot help: the process would not exist until someone spoke, so
+	// the first utterance after boot pays python startup plus a model load. It
+	// costs no VRAM and an idle resident model uses no CPU, so there is nothing
+	// to save by waiting. Done in the background so a slow load cannot delay the
+	// listener coming up.
+	if *moonshineEnabled && *moonshinePreload && gpuLifecycle != nil && gpuLifecycle.Has("moonshine") {
+		go func() {
+			if err := gpuLifecycle.Start("moonshine", false); err != nil {
+				log.Printf("moonshine: warm start failed, will start on first request: %v", err)
+				return
+			}
+			log.Printf("moonshine: sidecar warm and resident")
+		}()
 	}
 
 	var audioStore *store.Store
@@ -843,6 +870,23 @@ func resolveVRAMLimit(value string) (int, error) {
 		return 0, fmt.Errorf("max_vram_mib must be auto or a positive integer, got %q", value)
 	}
 	return limit, nil
+}
+
+// intFromPtr and boolFromPtr distinguish "absent from the config" from an
+// explicit zero or false, so a default of true or nonzero can still be turned
+// off in the config file.
+func intFromPtr(value *int, fallback int) int {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func boolFromPtr(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
 }
 
 func modelVRAM(configured map[string]int, id string, fallback int) int {

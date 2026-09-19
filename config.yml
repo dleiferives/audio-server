@@ -168,5 +168,16 @@ moonshine_python: "stt/moonshine/.venv/bin/python"
 moonshine_script: "stt/moonshine/server.py"
 moonshine_language: "en"
 moonshine_model_arch: "MEDIUM_STREAMING"
-moonshine_update_interval: 0.5  # seconds between streaming transcript refreshes
-moonshine_threads: 0            # 0 = all physical cores
+# Seconds between streaming transcript refreshes. This is the main latency knob:
+# a refresh costs far more than ingesting audio, so refreshing too often drives
+# CPU past realtime and the transcript falls progressively further behind the
+# speaker. The sidecar throttles to this interval regardless of how small the
+# frames a client sends are.
+moonshine_update_interval: 0.5
+moonshine_threads: 0            # 0 = all physical cores; 8 measured faster than all on this box
+# Keep the model resident and load it at startup. Moonshine costs no VRAM, and an
+# idle resident model uses no CPU, so the only cost is RAM. Reloading costs about
+# a second on the first utterance after a pause, which is very noticeable when
+# dictating intermittently.
+moonshine_idle_unload_seconds: 0
+moonshine_preload: true
