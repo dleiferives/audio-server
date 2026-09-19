@@ -45,6 +45,7 @@ import (
 	"github.com/dleiferives/audio-server/internal/separationjob"
 	"github.com/dleiferives/audio-server/internal/server"
 	"github.com/dleiferives/audio-server/internal/store"
+	"github.com/dleiferives/audio-server/internal/sttcorpus"
 	"github.com/dleiferives/audio-server/internal/sttprovider"
 
 	yaml "gopkg.in/yaml.v3"
@@ -56,6 +57,8 @@ type configFile struct {
 	WebDir                    string         `yaml:"web_dir"`
 	AudioStoreDir             string         `yaml:"audio_store_dir"`
 	AudioTTLSeconds           int            `yaml:"audio_ttl_seconds"`
+	SttCaptureEnabled         bool           `yaml:"stt_capture_enabled"`
+	SttCaptureDir             string         `yaml:"stt_capture_dir"`
 	MaxInputChars             int            `yaml:"max_input_chars"`
 	RequestTimeoutSeconds     int            `yaml:"request_timeout_seconds"`
 	MaxConcurrency            int            `yaml:"max_concurrency"`
@@ -287,6 +290,8 @@ func main() {
 	webDir := flag.String("web-dir", env("AUDIO_WEB_DIR", cfg.WebDir), "optional path to static web frontend directory")
 	audioTTL := flag.Int("audio-ttl-seconds", envInt("AUDIO_AUDIO_TTL_SECONDS", cfg.AudioTTLSeconds), "audio file retention in seconds (0 = forever)")
 	audioStoreDir := flag.String("audio-store-dir", env("AUDIO_STORE_DIR", cfg.AudioStoreDir), "directory for generated audio files (empty = in-memory)")
+	sttCaptureEnabled := flag.Bool("stt-capture-enabled", cfg.SttCaptureEnabled, "record transcribed audio and text as an ASR fine-tuning corpus")
+	sttCaptureDir := flag.String("stt-capture-dir", env("AUDIO_STT_CAPTURE_DIR", valueOr(cfg.SttCaptureDir, "stt-corpus")), "directory for the STT fine-tuning corpus; never swept on a TTL")
 	alignEnabled := flag.Bool("align-enabled", cfg.AlignEnabled, "enable MFA forced alignment")
 	alignMFAEnv := flag.String("align-mfa-env", cfg.AlignMFAEnv, "path to MFA micromamba environment")
 	alignMFAWorkDir := flag.String("align-mfa-work-dir", cfg.AlignMFAWorkDir, "MFA working directory")
@@ -622,6 +627,18 @@ func main() {
 		log.Printf("audio store: %s (ttl=%s)", *audioStoreDir, time.Duration(*audioTTL)*time.Second)
 	}
 
+	// Deliberately not bound to audio_ttl_seconds: the TTL sweeps generated TTS
+	// output, while this is a training corpus that must never expire.
+	var sttCorpus *sttcorpus.Recorder
+	if *sttCaptureEnabled && strings.TrimSpace(*sttCaptureDir) != "" {
+		c, err := sttcorpus.New(*sttCaptureDir)
+		if err != nil {
+			log.Fatalf("stt corpus: %v", err)
+		}
+		sttCorpus = c
+		log.Printf("stt corpus: recording transcribed audio to %s (no expiry)", c.Dir())
+	}
+
 	var alignProvider server.Aligner
 	if *alignEnabled {
 		langMap := loadAlignLanguages(*alignMFAModelsConfig)
@@ -723,6 +740,7 @@ func main() {
 		SttRunGate:             gpuRunGate(gpuLifecycle),
 		WebDir:                 *webDir,
 		AudioStore:             audioStore,
+		SttCorpus:              sttCorpus,
 		AlignProvider:          alignProvider,
 		AnalysisJobs:           analysisJobs,
 		AnalysisMaxUploadBytes: int64(*analysisMaxUploadMiB) << 20,

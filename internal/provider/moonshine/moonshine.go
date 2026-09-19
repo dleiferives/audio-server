@@ -262,7 +262,13 @@ func (p Provider) liveRequest(ctx context.Context, path string, pcm []byte, head
 		Revision      int    `json:"revision"`
 		Changed       bool   `json:"changed"`
 		Final         bool   `json:"final"`
-		Error         struct {
+		Lines         []struct {
+			Text       string `json:"text"`
+			StartMS    int64  `json:"start_ms"`
+			DurationMS int64  `json:"duration_ms"`
+			Complete   bool   `json:"complete"`
+		} `json:"lines"`
+		Error struct {
 			Message string `json:"message"`
 		} `json:"error"`
 	}
@@ -276,10 +282,16 @@ func (p Provider) liveRequest(ctx context.Context, path string, pcm []byte, head
 		}
 		return sttprovider.LiveStreamUpdate{}, fmt.Errorf("%w: %s", sttprovider.ErrUnavailable, message)
 	}
+	var lines []sttprovider.LiveLine
+	for _, line := range parsed.Lines {
+		lines = append(lines, sttprovider.LiveLine{
+			Text: line.Text, StartMS: line.StartMS, DurationMS: line.DurationMS, Complete: line.Complete,
+		})
+	}
 	return sttprovider.LiveStreamUpdate{
 		Text: parsed.Text, CommittedText: parsed.CommittedText, TentativeText: parsed.TentativeText,
 		InputMS: parsed.InputMS, BufferedMS: parsed.BufferedMS, Revision: parsed.Revision,
-		Changed: parsed.Changed, Final: parsed.Final,
+		Changed: parsed.Changed, Final: parsed.Final, Lines: lines,
 	}, nil
 }
 

@@ -87,6 +87,23 @@ type LiveStreamUpdate struct {
 	Revision      int
 	Changed       bool
 	Final         bool
+
+	// Lines optionally breaks the transcript into timed lines. Providers that
+	// cannot report per-line timing leave it nil, so consumers must treat it as
+	// absent rather than empty. It exists so recorded audio can be segmented
+	// into per-utterance training clips at the provider's own boundaries
+	// instead of being re-segmented by guesswork.
+	Lines []LiveLine
+}
+
+// LiveLine is one line of a live transcript, positioned against the audio fed so
+// far. Complete reports whether the provider considers the line settled; an
+// incomplete line is still being revised.
+type LiveLine struct {
+	Text       string
+	StartMS    int64
+	DurationMS int64
+	Complete   bool
 }
 
 type LiveStream interface {

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"net/url"
@@ -24,10 +25,12 @@ import (
 
 	"github.com/dleiferives/audio-server/internal/analysisjob"
 	"github.com/dleiferives/audio-server/internal/apidocs"
+	"github.com/dleiferives/audio-server/internal/pcmwav"
 	"github.com/dleiferives/audio-server/internal/provider"
 	"github.com/dleiferives/audio-server/internal/queue"
 	"github.com/dleiferives/audio-server/internal/separationjob"
 	"github.com/dleiferives/audio-server/internal/store"
+	"github.com/dleiferives/audio-server/internal/sttcorpus"
 	"github.com/dleiferives/audio-server/internal/sttjob"
 	"github.com/dleiferives/audio-server/internal/sttprovider"
 )
@@ -73,6 +76,12 @@ type Config struct {
 	// Nil means audio is held in memory only.
 	AudioStore *store.Store
 
+	// SttCorpus records transcribed audio and its text as an ASR fine-tuning
+	// corpus. Nil disables capture, which is the default: unlike AudioStore
+	// this keeps recordings of what users said, so it is opt-in and never
+	// swept on a TTL.
+	SttCorpus *sttcorpus.Recorder
+
 	// AlignProvider handles forced alignment via MFA subprocess.
 	// Nil when alignment is disabled.
 	AlignProvider Aligner
@@ -115,6 +124,7 @@ type Server struct {
 	sttJobs                *sttjob.Manager
 	webDir                 string
 	audioStore             *store.Store
+	sttCorpus              *sttcorpus.Recorder
 	alignProvider          Aligner
 	alignMu                sync.Mutex
 	analysisJobs           *analysisjob.Manager
@@ -204,6 +214,7 @@ func New(cfg Config) (*Server, error) {
 		}),
 		webDir:                 cfg.WebDir,
 		audioStore:             cfg.AudioStore,
+		sttCorpus:              cfg.SttCorpus,
 		alignProvider:          cfg.AlignProvider,
 		analysisJobs:           cfg.AnalysisJobs,
 		analysisMaxUploadBytes: cfg.AnalysisMaxUploadBytes,
@@ -577,6 +588,26 @@ func (s *Server) liveTranscription(w http.ResponseWriter, r *http.Request) {
 	}
 	var postProcessPCM []byte
 
+	// Corpus capture. The session is flushed on any exit path, so audio is kept
+	// even when a client drops the connection without committing.
+	var session *sttcorpus.Session
+	var lastText string
+	var lastLines []sttprovider.LiveLine
+	captured := false
+	if s.sttCorpus != nil {
+		session = s.sttCorpus.NewSession(16000, sttcorpus.Meta{
+			Provider: p.ID(), Model: p.ID(), Language: r.URL.Query().Get("language"),
+		})
+		defer func() {
+			if session == nil || captured {
+				return
+			}
+			if _, err := session.Finish(lastText, corpusLines(lastLines)); err != nil {
+				log.Printf("stt corpus: recording abandoned live session failed: %v", err)
+			}
+		}()
+	}
+
 	for {
 		messageType, payload, err := conn.ReadMessage()
 		if err != nil {
@@ -591,10 +622,24 @@ func (s *Server) liveTranscription(w http.ResponseWriter, r *http.Request) {
 				}
 				postProcessPCM = append(postProcessPCM, payload...)
 			}
+			if session != nil {
+				// Capturing more audio than a single upload may hold would
+				// leave the stored clip disagreeing with its transcript, so
+				// capture is dropped for this session rather than truncated.
+				if session.Bytes()+len(payload) > s.maxUploadBytes {
+					log.Printf("stt corpus: live session exceeds %d bytes, dropping capture", s.maxUploadBytes)
+					session = nil
+				} else {
+					session.Append(payload)
+				}
+			}
 			update, err := stream.Feed(r.Context(), payload)
 			if err != nil {
 				writeLiveSTTError(conn, err)
 				return
+			}
+			if update.Text != "" {
+				lastText, lastLines = update.Text, update.Lines
 			}
 			if update.Changed {
 				if err := conn.WriteJSON(liveSTTEvent("transcript.text.partial", update)); err != nil {
@@ -618,6 +663,12 @@ func (s *Server) liveTranscription(w http.ResponseWriter, r *http.Request) {
 				}
 				if err := conn.WriteJSON(liveSTTEvent("transcript.text.done", update)); err != nil {
 					return
+				}
+				if session != nil {
+					captured = true
+					if _, err := session.Finish(update.Text, corpusLines(update.Lines)); err != nil {
+						log.Printf("stt corpus: recording live session failed: %v", err)
+					}
 				}
 				if postProcessModel != "" {
 					wav, err := pcm16WAV(postProcessPCM, 16000, 1)
@@ -1521,6 +1572,7 @@ func (s *Server) transcriptions(w http.ResponseWriter, r *http.Request) {
 		writeSttProviderError(w, err)
 		return
 	}
+	s.recordTranscribedUpload(ctx, transcriptionRequest.Audio, result, transcriptionRequest.Language)
 
 	if responseFormat == "text" {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -1529,6 +1581,59 @@ func (s *Server) transcriptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"text": result.Text})
+}
+
+// recordTranscribedUpload adds a buffered upload to the fine-tuning corpus.
+// Capture must never affect the response, so every failure is logged and
+// swallowed rather than surfaced to the client.
+//
+// The corpus stores canonical mono PCM16 WAV. Providers that declare
+// AudioRequirements have already had their audio normalized, so it is stored as
+// is; for the rest the upload is converted here, which costs one extra ffmpeg
+// run on a path that is only taken when capture is enabled.
+func (s *Server) recordTranscribedUpload(ctx context.Context, audio []byte, result sttprovider.TranscriptionResult, language string) {
+	if s.sttCorpus == nil || len(audio) == 0 || strings.TrimSpace(result.Text) == "" {
+		return
+	}
+	if _, err := pcmwav.Parse(audio); err != nil {
+		if s.sttAudioNormalizer == nil {
+			log.Printf("stt corpus: skipping upload, cannot normalize: %v", err)
+			return
+		}
+		normalized, err := s.sttAudioNormalizer.NormalizeAudio(ctx, audio,
+			sttprovider.AudioFormat{Container: "wav", Codec: "pcm_s16le", SampleRate: 16000, Channels: 1})
+		if err != nil {
+			log.Printf("stt corpus: skipping upload, normalize failed: %v", err)
+			return
+		}
+		audio = normalized.Audio
+	}
+	meta := sttcorpus.Meta{Provider: result.ProviderID, Model: result.ProviderID, Language: firstNonEmpty(result.Language, language)}
+	if _, err := s.sttCorpus.RecordUpload(audio, result.Text, meta); err != nil {
+		log.Printf("stt corpus: recording upload failed: %v", err)
+	}
+}
+
+// corpusLines keeps the settled lines of a live transcript. Incomplete lines are
+// still being revised, so their text and timing would not match the audio.
+func corpusLines(lines []sttprovider.LiveLine) []sttcorpus.Line {
+	var out []sttcorpus.Line
+	for _, line := range lines {
+		if !line.Complete || strings.TrimSpace(line.Text) == "" {
+			continue
+		}
+		out = append(out, sttcorpus.Line{Text: line.Text, StartMS: line.StartMS, DurationMS: line.DurationMS})
+	}
+	return out
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func normalizedWAVFilename(filename string) string {

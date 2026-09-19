@@ -273,6 +273,19 @@ class Engine:
             if line.is_complete:
                 committed_ms = max(committed_ms, int((line.start_time + line.duration) * 1000))
 
+        # Per-line timing lets the caller cut recorded audio into per-utterance
+        # training clips on Moonshine's own boundaries.
+        lines = [
+            {
+                "text": line.text.strip(),
+                "start_ms": int(line.start_time * 1000),
+                "duration_ms": int(line.duration * 1000),
+                "complete": bool(line.is_complete),
+            }
+            for line in transcript.lines
+            if line.text.strip()
+        ]
+
         return {
             "text": text,
             "committed_text": committed,
@@ -282,6 +295,7 @@ class Engine:
             "revision": self.revision,
             "changed": changed,
             "final": final,
+            "lines": lines,
         }
 
     def reset(self) -> None:

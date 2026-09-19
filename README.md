@@ -51,6 +51,24 @@ the GPU is busy with other work:
 make run-cpu        # builds, sets up the Moonshine env, runs config.local.yml
 ```
 
+## Recording an STT fine-tuning corpus
+
+`audio_ttl_seconds` applies to **generated** audio only. Transcribed *input* is
+discarded unless `stt_capture_enabled` is set, which records it with its
+transcript as ASR training data in `stt_capture_dir` (default `stt-corpus/`,
+gitignored, never swept on a TTL):
+
+```
+stt-corpus/manifest.jsonl          # one JSON object per clip
+stt-corpus/uploads/<date>/<id>.wav
+stt-corpus/sessions/<date>/<id>.wav
+stt-corpus/lines/<date>/<id>-000.wav
+```
+
+Live sessions are stored whole *and* split into one clip per completed
+utterance, so the corpus is usable either way. Off by default — it records what
+people say. See [`docs/providers.md`](docs/providers.md) for the manifest schema.
+
 Open the self-contained interactive API reference at
 [`http://127.0.0.1:8010/docs`](http://127.0.0.1:8010/docs), or consume the
 OpenAPI 3.1 contract from `http://127.0.0.1:8010/openapi.json`.

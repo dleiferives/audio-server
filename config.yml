@@ -5,7 +5,17 @@ web_dir: "web"
 
 # ── audio ──
 audio_store_dir: "audio-output"
-audio_ttl_seconds: 0          # 0 = forever
+audio_ttl_seconds: 0          # 0 = forever. Governs GENERATED TTS output and
+                              # separation stems only, never STT input.
+
+# ── STT fine-tuning corpus ──
+# Off by default: this records the audio people speak into the STT endpoints,
+# paired with its transcript, as training data. It is intentionally not governed
+# by audio_ttl_seconds and is never swept — a corpus that expires is useless.
+# Writes 16 kHz mono WAV plus an append-only manifest.jsonl; live sessions store
+# both the whole session and one clip per completed line.
+stt_capture_enabled: false
+stt_capture_dir: "stt-corpus"
 max_input_chars: 1000000
 request_timeout_seconds: 0    # 0 = disabled
 max_concurrency: 2

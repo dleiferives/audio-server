@@ -241,6 +241,51 @@ Qwen3-ASR, Moonshine, and transcribe.cpp currently declare mono 16 kHz PCM WAV; 
 original upload directly. Invalid or undecodable input returns `400` before a
 provider is started.
 
+### Recording an STT fine-tuning corpus
+
+`audio_ttl_seconds` and `audio_store_dir` govern **generated** audio — TTS output
+and separation stems. The STT handlers never wrote anything, so transcribed
+*input* audio used to be discarded. `stt_capture_enabled` records it instead,
+paired with its transcript, as ASR fine-tuning data (`internal/sttcorpus`).
+
+It is off by default, because it records what people say. It is also deliberately
+**not** governed by `audio_ttl_seconds`: the corpus lives in `stt_capture_dir`
+(default `stt-corpus/`, gitignored) and is never swept, since a training corpus
+that expires is useless.
+
+Both entry points are captured: buffered `POST /v1/audio/transcriptions` uploads
+and live WebSocket sessions. Audio is stored as canonical 16 kHz mono PCM16 WAV —
+already normalized for providers declaring `AudioRequirements`, converted with
+one extra ffmpeg pass otherwise.
+
+```
+stt-corpus/manifest.jsonl
+stt-corpus/uploads/2026-09-19/<id>.wav
+stt-corpus/sessions/2026-09-19/<id>.wav
+stt-corpus/lines/2026-09-19/<id>-000.wav
+```
+
+`manifest.jsonl` is append-only, one JSON object per clip, with snake_case fields
+(`audio`, `text`, `duration_s`, `sample_rate`, `language`, `provider`, `source`,
+`created_at`) so it loads as a Hugging Face / Whisper-style dataset without
+conversion.
+
+A live session is stored twice over: once whole (`source: live-session`) and once
+per completed line (`source: live-line`), each line carrying `offset_s`,
+`line_index`, and `session_audio` so clips trace back to their session. Lines
+come from the provider's own boundaries via `LiveStreamUpdate.Lines` rather than
+being re-segmented by guesswork — Moonshine is currently the only provider that
+reports them, and providers that cannot leave the field nil. Only *completed*
+lines become clips; a line still being revised would not match its audio, and a
+line whose window falls outside the recorded audio is skipped rather than
+truncated.
+
+Capture never affects a response: every failure is logged and swallowed. A
+session is also flushed if the client disconnects without sending
+`input_audio.commit`, so dropped connections still leave usable data. Capture is
+abandoned for a session that would exceed the upload ceiling, rather than storing
+audio that disagrees with its transcript.
+
 ### Moonshine (CPU only)
 
 **ID:** `moonshine`
