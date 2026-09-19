@@ -5,6 +5,7 @@
   "device": 0,
   "threads": 12,
   "lazy_load": true,
+  "min_free_memory_mb": 256,
   "model_spec_override": "../audio.cpp/model_specs",
   "models": [
     {

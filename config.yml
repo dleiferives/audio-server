@@ -35,7 +35,8 @@ max_vram_mib: 2048             # below supertonic+omnivoice combined, so only on
 model_vram_mib:                # conservative residency estimates; tune per GPU/build
   supertonic: 768
   omnivoice: 1600
-  parakeet: 1280
+  parakeet: 1024           # measured peak 867 over an idle card during cold load
+  moonshine: 768           # measured peak 463, but the buffer grows with utterance length
   nemotron: 1280
   qwen3-asr-0.6b: 1792
   qwen3-asr-1.7b: 3584
