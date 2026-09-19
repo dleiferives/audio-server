@@ -43,3 +43,56 @@ Notes:
   should not be resident on the GPU while a TTS model needs the VRAM.
 - The metric that matters is not boundary F1, it is whether peak VRAM stays
   bounded and no chunk boundary lands mid-clause. Measure both.
+
+## Re-transcribe the corpus with a stronger model, then train a corrector
+
+**Status:** not started. Current stopgap: `stt_capture_enabled` records each clip
+with a single `text` field holding whatever the live provider (Moonshine v2
+`MEDIUM_STREAMING`) emitted, and nothing re-reads it.
+
+Two separate goals share the same data. The first is a better corpus: Moonshine
+runs on the CPU under a latency budget, so its transcripts are the weakest labels
+we will ever have for this audio. Re-running a slower, stronger model offline
+over the stored WAVs produces better targets for fine-tuning on one speaker's
+voice. The second is a cheap corrector: keeping the *original* Moonshine output
+alongside the improved transcript gives aligned (hypothesis, reference) pairs,
+which is training data for a small model that fixes Moonshine's habitual
+mistakes without paying for a large model at inference time.
+
+Fine-tuning on the stored `text` alone is self-training and will reinforce
+existing errors as readily as correct them, which is why the second transcript is
+the point rather than a nice-to-have.
+
+Notes:
+
+- **Never overwrite `text`.** It is the corrector's input side. A better
+  transcript belongs in an additional field (`text_reference`, or similar) with
+  the producing model recorded next to it. Overwriting destroys the pairing the
+  corrector needs, irreversibly and silently.
+- `post_process_model` on `GET /v1/audio/transcriptions/stream` already does the
+  "stronger model on the same audio" step live: it accumulates the session PCM
+  and submits it to a second provider as a job
+  (`internal/server/server.go`, around the `input_audio.commit` branch).
+  **Its result never reaches the corpus** — the refined text is only readable via
+  `GET /v1/audio/transcription-jobs/{id}`, so today a caller using it still
+  records only the weaker transcript. Wiring that job's result back as a second
+  transcript on the same corpus entry would collect the pairs automatically, with
+  no offline pass. This is the cheapest path and should be done first.
+- The corpus `model` field currently records the provider id (`moonshine`) and
+  not the architecture (`MEDIUM_STREAMING`). Error profiles differ per arch, so a
+  corpus spanning an arch change would silently mix two distributions with no way
+  to separate them. Record the resolved arch before collecting data in volume.
+- An offline pass is still needed for audio already captured, and for models too
+  slow to sit in a request path. It should read `manifest.jsonl`, skip entries
+  that already carry a reference transcript, and append rather than rewrite, so
+  it can be interrupted and resumed.
+- Prefer a model with a genuinely different error profile for the reference pass,
+  not just a bigger Moonshine — agreement between two models with correlated
+  failures would overstate label quality. `faster-whisper large-v3` and
+  `cohere-transcribe` are already wired and are the obvious first candidates, but
+  both are CUDA paths, so this pass wants a GPU that is not busy.
+- Human correction still beats every model here for a single-speaker corpus.
+  `manifest.jsonl` is line-oriented plain text specifically so entries can be
+  hand-edited; a small review tool that plays a clip and edits its text would
+  produce better references than any automated pass, and the corrector can be
+  trained on those.
